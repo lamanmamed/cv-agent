@@ -12,8 +12,8 @@ export async function readJSON(request: Request, maxBytes = 75000) {
   const bytes = new Uint8Array(length); let offset = 0; for(const chunk of chunks) {bytes.set(chunk,offset);offset+=chunk.length;}
   try {return JSON.parse(new TextDecoder().decode(bytes));} catch {throw new Error("Invalid JSON request.");}
 }
-export async function boundedFetchText(url: string, headers: Record<string,string> = {}, limit = 500000) {
-  const response = await fetch(url,{headers,redirect:"error",signal:AbortSignal.timeout(15000)});
+export async function boundedFetchText(url: string, headers: Record<string,string> = {}, limit = 500000,timeoutMs=15000) {
+  const response = await fetch(url,{headers,redirect:"error",signal:AbortSignal.timeout(timeoutMs)});
   if(response.status === 429 || response.status === 403) throw new Error("This service is rate-limiting requests. Paste the text instead or try later.");
   if(!response.ok) throw new Error("The link could not be read. Check that it is public and still available, or paste the text instead.");
   if(Number(response.headers.get("content-length"))>limit) throw new Error("The source is too large. Paste just the relevant text.");

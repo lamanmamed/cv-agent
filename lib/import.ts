@@ -1,4 +1,5 @@
 import type { Evidence } from "./cv";
+import {pdfItemsToText,type PDFTextItem} from "./pdf-text.ts";
 const MAX_FILE = 10 * 1024 * 1024;
 export function redactSecrets(text: string) {
   return text.replace(/\b(?:ghp_|github_pat_|gsk_|sk-)[A-Za-z0-9_-]{16,}\b/g, "[REDACTED TOKEN]").replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, "[REDACTED PRIVATE KEY]").replace(/((?:api[_-]?key|secret|password|access[_-]?token)\s*[:=]\s*)["']?[^\s"'\n]{8,}["']?/gi, "$1[REDACTED]");
@@ -13,14 +14,8 @@ export async function readCV(file: File): Promise<string> {
     try {
       if (pdf.numPages > 20) throw new Error("Use a CV with no more than 20 pages.");
       for (let i = 1; i <= pdf.numPages; i++) {
-        const page = await pdf.getPage(i), content = await page.getTextContent(); let previousY: number | undefined, line = "";
-        for (const item of content.items) {
-          if (!("str" in item)) continue; const y = item.transform[5];
-          if (previousY !== undefined && Math.abs(y - previousY) > 3) {text += line.trim() + "\n"; line = "";}
-          line += item.str + " "; previousY = y;
-          if (item.hasEOL) {text += line.trim() + "\n"; line = ""; previousY = undefined;}
-        }
-        text += line.trim() + "\n";
+        const page = await pdf.getPage(i), content = await page.getTextContent();
+        text += pdfItemsToText(content.items.filter(item=>"str" in item) as PDFTextItem[])+"\n\n";
       }
     } finally { await loading.destroy(); }
   } else if (extension === "docx") {const mammoth = await import("mammoth"); text = (await mammoth.extractRawText({ arrayBuffer: await file.arrayBuffer() })).value;}

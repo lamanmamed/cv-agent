@@ -1,15 +1,31 @@
 export type Block = { id: string; text: string; section: string; heading: boolean };
 export type Evidence = { id: string; name: string; text: string };
 export type Citation = { sourceId: string; quote: string };
-export type Suggestion = { id: string; blockId: string; original: string; suggested: string; reason: string; citations: Citation[]; status: "pending" | "accepted" | "rejected"; comment?: string };
-export type Analysis = { suggestions: Suggestion[]; gaps: string[]; mode: "local" | "groq" };
+export type Suggestion = { id: string; blockId: string; original: string; suggested: string; reason: string; citations: Citation[]; status: "pending" | "accepted" | "rejected"; comment?: string; jobRequirement?:string };
+export type CompanyInsight = {point:string;sourceId:string;quote:string};
+export type Analysis = { suggestions: Suggestion[]; gaps: string[]; mode: "local" | "groq"; insights?:CompanyInsight[];model?:string };
+export type ResearchSource = {id:string;title:string;url:string;text:string};
+export type CompanyResearch = {url:string;sources:ResearchSource[];failures:string[]};
+export type ReviewHistory = Pick<Suggestion,"blockId"|"original"|"suggested"|"status">;
+export function normalizedEdit(text:string) {return text.normalize("NFKC").replace(/\s+/g," ").trim().toLowerCase();}
+export function isMeaningfulEdit(before:string,after:string) {return normalizedEdit(before)!==normalizedEdit(after);}
+export function isEntryLine(text:string) {return /^(?:MSc|BSc|BEng|MEng|MA|BA|PhD|MBA|Master|Bachelor|Doctor)\b/i.test(text)|| /\b(?:university|college|institute)\b/i.test(text)&&!/[.!?]$/.test(text)||/\s[|·]\s/.test(text)||/\b(?:19|20)\d{2}\b.*(?:present|current|(?:19|20)\d{2})/i.test(text);}
 export const HEADINGS = /^(summary|profile|professional summary|experience|work experience|employment|education|skills|technical skills|projects|research|publications|certifications|languages|interests|awards|volunteering|professional experience)\s*:?$/i;
 export const SKILLS = ["Python", "SQL", "PyTorch", "TensorFlow", "scikit-learn", "React", "TypeScript", "JavaScript", "Java", "C++", "Rust", "Go", "R", "Docker", "Kubernetes", "AWS", "Azure", "GCP", "Git", "GitHub", "PostgreSQL", "MongoDB", "Spark", "Pandas", "NumPy", "Tableau", "Power BI", "Excel", "machine learning", "deep learning", "NLP", "LLM", "transformer", "computer vision", "A/B testing", "data visualization", "statistics", "API", "ETL", "CI/CD", "MLOps"];
 const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 export function containsTerm(text: string, term: string) { return new RegExp(`(^|[^a-z0-9])${escape(term)}(?=$|[^a-z0-9])`, "i").test(text); }
 export function parseCV(text: string): Block[] {
   let section = "Profile";
-  return text.replace(/\r/g, "").split("\n").map(s => s.trim()).filter(Boolean).map((text, i) => {
+  const lines:string[]=[];let separated=false;
+  for (const raw of text.replace(/\r/g, "").split("\n")) {
+    const line=raw.replace(/[\u00ad\u200b]/g,"").replace(/\s+/g," ").trim();
+    if(!line){separated=true;continue;}
+    const previous=lines[lines.length-1];
+    if(previous&&!separated&&/^[•●▪\-*]\s*/.test(previous)&&!HEADINGS.test(line)&&! /^[•●▪\-*]\s*/.test(line)&&!isEntryLine(line)&&previous.length+line.length<1500) lines[lines.length-1]=previous+" "+line;
+    else lines.push(line);
+    separated=false;
+  }
+  return lines.map((text, i) => {
     const heading = HEADINGS.test(text); if (heading) section = text.replace(/:$/, "");
     return { id: `line-${i}`, text, section, heading };
   });
@@ -21,21 +37,14 @@ export function keywordReport(blocks: Block[], job: string, evidence: Evidence[]
   return { requirements, matched: requirements.filter(s => containsTerm(cv, s)), evidenceOnly: requirements.filter(s => !containsTerm(cv, s) && containsTerm(work, s)), missing: requirements.filter(s => !containsTerm(cv, s) && !containsTerm(work, s)) };
 }
 export function localAnalysis(blocks: Block[], job: string, evidence: Evidence[]): Analysis {
-  const suggestions: Suggestion[] = [];
-  for (const block of blocks) {
-    if (block.heading || block.text.length < 25) continue;
-    let suggested = block.text.replace(/^(?:[•\-*]\s*)?I (?:have |had )?/i, "").replace(/\bWorked on building\b/gi, "Built").replace(/\bResponsible for developing\b/gi, "Developed").replace(/\bResponsible for managing\b/gi, "Managed").replace(/\bResponsible for analyzing\b/gi, "Analyzed").replace(/\bWorked on developing\b/gi, "Developed").replace(/\bIn order to\b/gi, "To").replace(/\butilized\b/gi, "used").replace(/\bhelped to\b/gi, "helped").replace(/\s{2,}/g, " ");
-    suggested = suggested.replace(/^([a-z])/, c => c.toUpperCase());
-    if (suggested !== block.text) suggestions.push({id: `edit-${suggestions.length}`, blockId: block.id, original: block.text, suggested, reason: "Use direct, concise wording while retaining the claim in your original CV.", citations: [{ sourceId: block.id, quote: block.text }], status: "pending"});
-  }
-  return { suggestions: suggestions.slice(0, 12), gaps: keywordReport(blocks, job, evidence).missing, mode: "local" };
+  return { suggestions: [], gaps: keywordReport(blocks, job, evidence).missing, mode: "local" };
 }
 export function validateSuggestions(items: unknown[], blocks: Block[], evidence: Evidence[]): Suggestion[] {
   const sources = cvSources(blocks, evidence), used = new Set<string>();
   return items.map((value, i) => {
     const item = value as Omit<Suggestion, "id" | "status">, block = blocks.find(b => b.id === item.blockId);
     if (!block || block.heading || block.text !== item.original || used.has(block.id)) throw new Error("The AI returned an invalid or duplicated CV target. Please try again.");
-    if (typeof item.suggested !== "string" || !item.suggested.trim() || item.suggested.length > 1500 || item.suggested === item.original || typeof item.reason !== "string") throw new Error("The AI returned an invalid edit.");
+    if (typeof item.suggested !== "string" || !item.suggested.trim() || item.suggested.length > 1500 || !isMeaningfulEdit(item.original,item.suggested) || typeof item.reason !== "string") throw new Error("The AI returned an empty or cosmetic-only edit.");
     if (!Array.isArray(item.citations) || !item.citations.length) throw new Error("An edit has no source citation.");
     for (const citation of item.citations) {
       const source = sources.find(e => e.id === citation.sourceId);
@@ -47,6 +56,9 @@ export function validateSuggestions(items: unknown[], blocks: Block[], evidence:
     for (const number of item.suggested.match(/\d+(?:[.,]\d+)*(?:%|\+)?/g) || []) if (!numbers.includes(number)) throw new Error("An unsupported number was blocked.");
     used.add(block.id); return { ...item, id: `edit-${i}`, status: "pending" as const };
   });
+}
+export function filterReviewedEdits(items:Suggestion[],history:ReviewHistory[]) {
+  return items.filter(item=>!history.some(old=>old.blockId===item.blockId&&(old.status==="accepted"||old.status==="pending"||old.status==="rejected"&&normalizedEdit(old.original)===normalizedEdit(item.original))));
 }
 export function applyDecision(blocks: Block[], suggestions: Suggestion[], id: string, status: "accepted" | "rejected" | "pending") {
   const suggestion = suggestions.find(s => s.id === id); if (!suggestion) throw new Error("Suggestion not found.");
