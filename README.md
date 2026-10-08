@@ -4,17 +4,17 @@ An AI CV editor that tailors resumes to job descriptions using evidence from you
 
 ## What works now
 
-- Import a text-based PDF, DOCX, TXT, or Markdown CV, or paste CV text.
+- Import a text-based PDF, DOCX, TXT, or Markdown CV, or paste CV text. PDF imports detect font family, sizes, weight, alignment, colors, and heading rules for the preview.
 - Import a public HTTPS job URL from any website, or paste its description. Known Greenhouse, Lever, and Ashby links use their public APIs; other pages use Jina Reader. Login walls and blocked pages require pasted text.
 - Research the company homepage and up to seven relevant linked pages, inspect the sources, and get cited company insights with AI analysis.
 - Import public GitHub READMEs (one repository, or up to three recently updated non-fork repositories from a profile).
 - Add project ZIPs, READMEs, and supporting documents. Read selected text files without executing uploaded code.
-- Run technical keyword checks without an API key. This does not generate CV rewrites or pretend to use AI.
+- Run non-AI review checks and concrete evidence questions without an API key. These comments are clearly labeled and do not rewrite the CV.
 - Verify your own Groq API key, then generate role-specific AI suggestions with exact job requirements, source excerpts, and selective comment-based revisions.
 - Accept or reject individual edits, edit proposed wording, inspect source excerpts, and undo decisions.
-- Export the approved CV as DOCX, plain text, or PDF via the browser's print dialog. Download the original text and review history as JSON.
+- Export the approved CV as DOCX, plain text, or a direct PDF download without browser headers or footers. Download the original text and review history as JSON.
 
-The app uses a clean single-column export template rather than preserving arbitrary uploaded layouts. There is no universal ATS pass score; the keyword panel is a limited technical-term scan, not a prediction of hiring outcomes.
+An unchanged PDF is returned in its original layout. Edited PDFs adapt to the detected typography, density, alignment, colors, and heading treatment. Complex columns, tables, and graphical layouts can reflow and are not reproduced exactly. Edited DOCX uploads retain the original OOXML package, paragraph properties, and styles of unchanged text runs. Text-only CVs use a compact neutral layout. There is no universal ATS pass score; the keyword panel is a limited technical-term scan, not a prediction of hiring outcomes.
 
 ## Run locally
 
@@ -38,7 +38,7 @@ pnpm build
 
 ## AI setup and costs
 
-The initial state is **AI not connected**. Open **AI settings**, enter a Groq key, and select **Test and connect**. Connection testing checks model access without generating text. Generate suggestions then makes a real Groq inference request; keyword checking is a separate action with no LLM calls. The key is kept only in tab memory, sent to the analysis endpoint per request, and never saved to a database or browser storage by this app.
+The initial state is **AI not connected**. Open **AI settings**, enter a Groq key, and select **Test and connect**. Connection testing checks model access without generating text. Generate suggestions then makes a real Groq inference request; review checks are a separate action with no LLM calls. The key is kept only in tab memory, sent to the analysis endpoint per request, and never saved to a database or browser storage by this app.
 
 The adapter calls Groq's OpenAI-compatible chat completions endpoint with `openai/gpt-oss-20b` and strict JSON-schema output. Using an OpenAI-named open model through Groq does not require an OpenAI API key. Use a Groq free-plan account if you want to avoid paid inference. Free quotas and model availability are controlled by Groq; this app cannot enforce your provider's billing settings. It does not silently upgrade plans, retry charged requests, or fall back to a paid provider. Quota errors are displayed; keyword checks remain available.
 
@@ -48,7 +48,7 @@ Provider requests and response validation are covered by mocked integration test
 
 The model returns proposals, not a replacement document. The server validates the response shape, original text, block IDs, unique targets, exact source excerpts, known technical-skill mentions, and numeric claims. An invalid response is blocked. These checks do **not** prove semantic accuracy or project authorship; the user still reviews every claim. A repository's capabilities are not assumed to be the user's personal contribution.
 
-Accepted edits replace only their target line. Undo restores that line. Stale proposals cannot overwrite manually changed text. Revising a suggestion sends that suggestion and the comment with the existing sources and asks for one replacement; other suggestions remain unchanged. Repeated analysis keeps the review history and suppresses already accepted, rejected, or pending targets. Cosmetic whitespace and capitalization edits are blocked. The model is asked for substantial changes and may return none. Job and company text can establish relevance, but cannot establish a candidate’s experience.
+Accepted edits replace only their target line. Undo restores that line. Stale proposals cannot overwrite manually changed text. Revising a suggestion sends that suggestion and the comment with the existing sources and asks for one replacement; other suggestions remain unchanged. Repeated analysis keeps the review history and suppresses already accepted, rejected, or pending targets. Cosmetic whitespace and capitalization edits are blocked. Each proposed edit is checked independently: an unverifiable edit does not discard the rest of the review. Job-requirement quotes tolerate whitespace/case differences. A valid completed review always includes supported suggestions or useful comments. If the provider request fails, the UI explains the error and offers clearly labeled non-AI comments. The model is asked for substantial changes and may return none. Job and company text can establish relevance, but cannot establish a candidate’s experience.
 
 ## Data handling and boundaries
 
@@ -60,7 +60,7 @@ Accepted edits replace only their target line. Undo restores that line. Stale pr
 - Job imports accept general public HTTPS websites. Private/local addresses, embedded credentials, and custom ports are rejected. General URLs are read through Jina Reader rather than fetched directly from the application network. Reader availability and rate limits may affect imports. Company research covers linked official pages, not an exhaustive search of the entire web.
 - GitHub imports support public READMEs only, not private repositories or full-code retrieval. Public API rate limits may apply.
 - Scanned-image PDFs need pasted text; OCR is not implemented. Complex multi-column PDFs may extract out of order. Check and edit extracted text before analysis.
-- Browser PDF output uses the print dialog; select **Save as PDF** and inspect pagination. Fonts are standard Arial and the original layout is replaced.
+- PDF output downloads directly; no app title, page URL, timestamp, or review annotations are added to the page. Embedded serif, sans, and mono fonts support Latin, Greek, and Cyrillic text. Unavailable glyphs produce an explicit export error instead of silently dropping characters. Review pagination before sending.
 - There are no accounts, durable CV storage, or cross-device history in this version.
 - The private hosted preview is owner-only. A future public deployment needs stronger abuse controls before adding any shared provider credential; this version uses each user's own key.
 
@@ -71,6 +71,7 @@ Accepted edits replace only their target line. Undo restores that line. Stale pr
 | Upload, preview, review, export | `components/workspace.tsx` |
 | CV blocks, keywords, edit validation, review history, decisions | `lib/cv.ts` |
 | PDF/DOCX/ZIP extraction, positioned PDF text, token redaction | `lib/import.ts`, `lib/pdf-text.ts` |
+| Imported style inference and direct PDF / DOCX exports | `lib/cv-style.ts`, `lib/export.ts` |
 | Public pages, company sources, relevant passage selection | `lib/web-research.ts`, `lib/retrieval.ts` |
 | Bounded requests and public source fetching | `lib/api.ts` |
 | Groq analysis and single-suggestion revisions | `app/api/analyze/route.ts` |
@@ -92,6 +93,7 @@ The site also exposes two browser WebMCP tools when the browser supports `docume
 - [Groq structured output](https://console.groq.com/docs/structured-outputs)
 - [Groq API keys](https://console.groq.com/keys)
 - [Jina Reader](https://github.com/jina-ai/reader)
+- [PDF-LIB](https://pdf-lib.js.org/)
 - [Greenhouse Job Board API](https://docs.greenhouse.io/job-board.html)
 - [Lever public Postings API](https://github.com/lever/postings-api)
 - [Ashby public Job Postings API](https://developers.ashbyhq.com/docs/public-job-posting-api)

@@ -1,11 +1,15 @@
 import {test} from "node:test";
 import assert from "node:assert/strict";
-import {applyDecision,parseCV,localAnalysis,validateSuggestions,keywordReport,isMeaningfulEdit,filterReviewedEdits,SAMPLE_CV,SAMPLE_JOB,SAMPLE_EVIDENCE,type Suggestion} from "../lib/cv.ts";
+import {applyDecision,parseCV,localAnalysis,validateSuggestions,keywordReport,isMeaningfulEdit,filterReviewedEdits,SAMPLE_CV,SAMPLE_JOB,SAMPLE_EVIDENCE,type Suggestion,descriptionError,isURLOnly} from "../lib/cv.ts";
 import {pdfItemsToText} from "../lib/pdf-text.ts";
 import {publicWebURL,researchCompany,readPublicPage} from "../lib/web-research.ts";
 import {readEvidence,redactSecrets} from "../lib/import.ts";
-import {readJSON} from "../lib/api.ts";
+import {readJSON,boundedFetchText} from "../lib/api.ts";
 import JSZip from "jszip";
+import {defaultCVStyle,inferPDFStyle} from "../lib/cv-style.ts";
+import {exportPDF} from "../lib/export.ts";
+import {readFile} from "node:fs/promises";
+import {PDFDocument} from "pdf-lib";
 import {POST as analyzeRequest} from "../app/api/analyze/route.ts";
 function reviewFixture():Suggestion[]{
   const block=parseCV(SAMPLE_CV).find(b=>b.text.includes("Responsible for analyzing"))!;
@@ -99,4 +103,37 @@ test("AI endpoint calls Groq, validates grounding, and suppresses reviewed edits
     const repeated=await send({history:[{...edit,status:"rejected"}]});assert.equal((await repeated.json() as {suggestions:unknown[]}).suggestions.length,0);
     const disconnected=await send({key:""});assert.equal(disconnected.status,400);assert.equal(calls,2);
   }finally{globalThis.fetch=originalFetch;}
+});
+
+
+test("URL in description is rejected before any AI request",async()=>{
+  const url="https://jobs.picnic.app/en/vacancies/J96UDJ5O/graduate-programs/analytics-future-leaders-graduate-program/amsterdam/north-holland/netherlands";
+  assert.ok(isURLOnly(url));assert.match(descriptionError(url)!,/wrong thing/);assert.equal(descriptionError(SAMPLE_JOB),null);
+  const originalFetch=globalThis.fetch;let calls=0;globalThis.fetch=async()=>{calls++;throw Error("must not call AI");};
+  try{const response=await analyzeRequest(new Request("https://cv.example/api/analyze",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({blocks:parseCV(SAMPLE_CV),job:url,evidence:[],key:"test-key-no-real-secret"})}));assert.equal(response.status,400);assert.equal(calls,0);const data=await response.json() as {code:string};assert.equal(data.code,"INVALID_JOB_DESCRIPTION");}finally{globalThis.fetch=originalFetch;}
+});
+test("public reader uses Workers-compatible manual redirects",async()=>{
+  const originalFetch=globalThis.fetch;globalThis.fetch=async(input,options)=>{assert.equal(options?.redirect,"manual");return new Response("Public source text.");};
+  try{assert.equal(await boundedFetchText("https://r.jina.ai/https://company.com"),"Public source text.");globalThis.fetch=async()=>new Response(null,{status:302,headers:{location:"https://private.internal"}});await assert.rejects(()=>boundedFetchText("https://r.jina.ai/https://company.com"),/redirected/);}finally{globalThis.fetch=originalFetch;}
+});
+test("empty AI edits still yield comments, and one invalid edit does not discard a valid edit",async()=>{
+  const originalFetch=globalThis.fetch,blocks=parseCV(SAMPLE_CV),valid={...reviewFixture()[0],jobRequirement:"Requirements: Python, SQL, PyTorch, statistics, and data visualization."};let output:object={suggestions:[],comments:[],insights:[]};
+  globalThis.fetch=async()=>Response.json({choices:[{message:{content:JSON.stringify(output)}}]});
+  const send=()=>analyzeRequest(new Request("https://cv.example/api/analyze",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({blocks,job:SAMPLE_JOB,evidence:[],key:"test-key-no-real-secret"})}));
+  try{let response=await send();let data=await response.json() as {suggestions:unknown[];comments:unknown[]};assert.equal(response.status,200);assert.equal(data.suggestions.length,0);assert.ok(data.comments.length>0);
+    output={suggestions:[{...valid,jobRequirement:"Made up requirement outside the job"},valid],comments:[],insights:[]};response=await send();data=await response.json() as typeof data;assert.equal(response.status,200);assert.equal(data.suggestions.length,1);assert.ok(data.comments.length>0);
+    output={suggestions:[{...valid,jobRequirement:valid.jobRequirement.replace(/ /g,"  ")}],comments:[],insights:[]};response=await send();data=await response.json() as typeof data;assert.equal(data.suggestions.length,1);
+  }finally{globalThis.fetch=originalFetch;}
+});
+
+
+test("PDF styling uses the imported family, sizes and alignment instead of green template styling",()=>{
+  const items=[{str:"Example Name",transform:[1,0,0,20,180,750],width:230,fontName:"name"},{str:"EXPERIENCE",transform:[1,0,0,12,45,700],width:90,fontName:"bold"},{str:"Documented original contribution",transform:[1,0,0,10,45,680],width:230,fontName:"body"}];
+  const style=inferPDFStyle([{width:595,height:842,items,fonts:{name:"Times-Bold",bold:"Times-Bold",body:"Times-Roman"},colors:{experience:"333333"},hasRules:true}],"Example Name\nEXPERIENCE\nDocumented original contribution");
+  assert.equal(style.body.family,"serif");assert.equal(style.body.size,10);assert.equal(style.name.size,20);assert.equal(style.name.align,"center");assert.equal(style.heading.color,"333333");assert.equal(style.headingRule,true);
+});
+test("PDF download embeds supported Unicode and omits app branding and timestamp metadata",async()=>{
+  const style=defaultCVStyle(),blocks=parseCV("Əli Məmmədova\nBakı | example@example.com\nEXPERIENCE\n• Explained results using Python and SQL.");
+  const bytes=await exportPDF(blocks,style,async path=>new Uint8Array(await readFile(new URL("../public"+path,import.meta.url))));
+  const document=await PDFDocument.load(bytes,{updateMetadata:false});assert.equal(document.getPageCount(),1);assert.equal(document.getTitle(),"Əli Məmmədova");assert.equal(document.getCreator(),"");assert.equal(document.getProducer(),"");assert.equal(document.getCreationDate(),undefined);
 });

@@ -1,30 +1,40 @@
 import type { Evidence } from "./cv";
 import {pdfItemsToText,type PDFTextItem} from "./pdf-text.ts";
+import {inferPDFStyle,inferDOCXStyle,defaultCVStyle,type CVStyle,type StyledPDFPage} from "./cv-style.ts";
+import {normalizedEdit} from "./cv.ts";
 const MAX_FILE = 10 * 1024 * 1024;
 export function redactSecrets(text: string) {
   return text.replace(/\b(?:ghp_|github_pat_|gsk_|sk-)[A-Za-z0-9_-]{16,}\b/g, "[REDACTED TOKEN]").replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, "[REDACTED PRIVATE KEY]").replace(/((?:api[_-]?key|secret|password|access[_-]?token)\s*[:=]\s*)["']?[^\s"'\n]{8,}["']?/gi, "$1[REDACTED]");
 }
-export async function readCV(file: File): Promise<string> {
+export async function readCVDocument(file: File): Promise<{text:string;style:CVStyle;bytes:ArrayBuffer|null;format:string}> {
   if (file.size > MAX_FILE) throw new Error("Use a CV smaller than 10 MB.");
-  const extension = file.name.split(".").pop()?.toLowerCase(); let text = "";
+  const extension = file.name.split(".").pop()?.toLowerCase(); let text = "",style=defaultCVStyle();let bytes:ArrayBuffer|null=null;
   if (extension === "pdf") {
     const pdfjs = await import("pdfjs-dist"); pdfjs.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
-    const loading = pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()) });
+    bytes=await file.arrayBuffer();const loading = pdfjs.getDocument({ data: new Uint8Array(bytes.slice(0)) });
+    const pages:StyledPDFPage[]=[];
     const pdf = await loading.promise;
     try {
       if (pdf.numPages > 20) throw new Error("Use a CV with no more than 20 pages.");
       for (let i = 1; i <= pdf.numPages; i++) {
         const page = await pdf.getPage(i), content = await page.getTextContent();
-        text += pdfItemsToText(content.items.filter(item=>"str" in item) as PDFTextItem[])+"\n\n";
+        const items=content.items.filter(item=>"str" in item) as (PDFTextItem&{fontName?:string})[],operators=await page.getOperatorList(),fonts:Record<string,string>={},colors:Record<string,string>={};
+        for(const item of items){if(!item.fontName)continue;try{fonts[item.fontName]=(page.commonObjs.get(item.fontName) as {name?:string}).name||content.styles[item.fontName]?.fontFamily||"Arial";}catch{fonts[item.fontName]=content.styles[item.fontName]?.fontFamily||"Arial";}}
+        let color="111111",hasRules=false;
+        operators.fnArray.forEach((fn,index)=>{const args=operators.argsArray[index];if(fn===pdfjs.OPS.setFillRGBColor){const value=args[0];color=typeof value==="string"?value.replace("#",""):Array.from(args as number[]).slice(0,3).map(c=>Math.round(c<=1?c*255:c).toString(16).padStart(2,"0")).join("");}if(fn===pdfjs.OPS.stroke)hasRules=true;if(fn===pdfjs.OPS.showText){const chars=(args[0] as ({unicode?:string}|number)[]).map(g=>typeof g==="object"?g.unicode||"":"").join("");if(chars.length>3)colors[normalizedEdit(chars)]=color;}});
+        const viewport=page.getViewport({scale:1});pages.push({width:viewport.width,height:viewport.height,items,fonts,colors,hasRules});
+        text += pdfItemsToText(items)+"\n\n";
       }
+    style=inferPDFStyle(pages,text);
     } finally { await loading.destroy(); }
-  } else if (extension === "docx") {const mammoth = await import("mammoth"); text = (await mammoth.extractRawText({ arrayBuffer: await file.arrayBuffer() })).value;}
+  } else if (extension === "docx") {const mammoth = await import("mammoth");bytes=await file.arrayBuffer();text=(await mammoth.extractRawText({arrayBuffer:bytes})).value;const JSZip=(await import("jszip")).default,zip=await JSZip.loadAsync(bytes);style=inferDOCXStyle(await zip.file("word/document.xml")!.async("string"),text);}
   else if (["txt", "md"].includes(extension || "")) text = await file.text();
   else throw new Error("Choose a PDF, DOCX, TXT, or Markdown CV.");
   if (!text.trim()) throw new Error("No readable text was found. For a scanned CV, paste the text instead.");
   if (text.length > 25000) throw new Error("The extracted CV is too long. Use a shorter CV or paste the relevant text.");
-  return text.trim();
+  return {text:text.trim(),style,bytes,format:extension||"text"};
 }
+export async function readCV(file:File):Promise<string>{return (await readCVDocument(file)).text;}
 export async function readEvidence(file: File): Promise<{sources: Evidence[]; skipped: number}> {
   if (file.size > MAX_FILE) throw new Error("Use evidence files smaller than 10 MB.");
   const extension = file.name.split(".").pop()?.toLowerCase();

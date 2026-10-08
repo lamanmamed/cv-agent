@@ -3,7 +3,8 @@ export type Evidence = { id: string; name: string; text: string };
 export type Citation = { sourceId: string; quote: string };
 export type Suggestion = { id: string; blockId: string; original: string; suggested: string; reason: string; citations: Citation[]; status: "pending" | "accepted" | "rejected"; comment?: string; jobRequirement?:string };
 export type CompanyInsight = {point:string;sourceId:string;quote:string};
-export type Analysis = { suggestions: Suggestion[]; gaps: string[]; mode: "local" | "groq"; insights?:CompanyInsight[];model?:string };
+export type ReviewComment = {id:string;blockId:string;kind:"question"|"observation"|"strength";text:string;origin:"ai"|"check"};
+export type Analysis = { suggestions: Suggestion[]; gaps: string[]; mode: "local" | "groq"; insights?:CompanyInsight[];comments?:ReviewComment[];model?:string };
 export type ResearchSource = {id:string;title:string;url:string;text:string};
 export type CompanyResearch = {url:string;sources:ResearchSource[];failures:string[]};
 export type ReviewHistory = Pick<Suggestion,"blockId"|"original"|"suggested"|"status">;
@@ -37,7 +38,19 @@ export function keywordReport(blocks: Block[], job: string, evidence: Evidence[]
   return { requirements, matched: requirements.filter(s => containsTerm(cv, s)), evidenceOnly: requirements.filter(s => !containsTerm(cv, s) && containsTerm(work, s)), missing: requirements.filter(s => !containsTerm(cv, s) && !containsTerm(work, s)) };
 }
 export function localAnalysis(blocks: Block[], job: string, evidence: Evidence[]): Analysis {
-  return { suggestions: [], gaps: keywordReport(blocks, job, evidence).missing, mode: "local" };
+  return { suggestions: [], comments:reviewComments(blocks,job,evidence), gaps: keywordReport(blocks, job, evidence).missing, mode: "local" };
+}
+export function isURLOnly(text:string){return /^(?:https?:\/\/|www\.)\S+\/?$/i.test(text.trim());}
+export function descriptionError(text:string){return isURLOnly(text)?"You pasted the wrong thing: this is a link. Paste it into Job link and press Read link.":text.trim().length<40?"Add the job description, including its requirements and responsibilities.":null;}
+export function reviewComments(blocks:Block[],job:string,evidence:Evidence[],reviewed=false):ReviewComment[]{
+  const report=keywordReport(blocks,job,evidence),comments:ReviewComment[]=[];
+  const add=(id:string,blockId:string,text:string)=>comments.push({id,blockId,text,kind:"question",origin:"check"});
+  if(report.evidenceOnly.length)add("check-evidence","",`${report.evidenceOnly.join(", ")} appears in project evidence but not the CV. Which parts did you personally implement? Confirm your contribution before adding it.`);
+  if(report.missing.length)add("check-gap","",`The job mentions ${report.missing.slice(0,5).join(", ")}, but these are not documented in the CV or project evidence. Do you have relevant experience to add? If not, leave them out.`);
+  const bullet=blocks.find(b=>/^[•●▪*-]/.test(b.text)&&!/[\d%]/.test(b.text));
+  if(bullet)add("check-outcome",bullet.id,`For “${bullet.text.replace(/^[•●▪*-]\s*/,"").slice(0,180)}”, what result, comparison, or scope can you substantiate? A concrete outcome would make the contribution easier to assess; it does not have to be a number.`);
+  if(!comments.length){const block=blocks.find(b=>!b.heading&&/experience|project|research/i.test(b.section));add("check-detail",block?.id||"",reviewed?"Your earlier decisions are retained. Which remaining achievement should we examine more closely for this role? Add a specific outcome or clarify your contribution to support another edit.":"Which achievement best demonstrates the responsibilities in this job? Add its outcome and your personal contribution if they are missing; I cannot infer them from a project name alone.");}
+  return comments.slice(0,3);
 }
 export function validateSuggestions(items: unknown[], blocks: Block[], evidence: Evidence[]): Suggestion[] {
   const sources = cvSources(blocks, evidence), used = new Set<string>();

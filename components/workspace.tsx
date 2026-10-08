@@ -5,13 +5,20 @@ import { FileText, Upload, BriefcaseBusiness, Layers, Check, X, MessageSquare, D
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { Toaster, toast } from "sonner";
-import { applyDecision, cvSources, keywordReport, localAnalysis, parseCV, isEntryLine, isMeaningfulEdit, SAMPLE_CV, SAMPLE_EVIDENCE, SAMPLE_JOB, type Block, type Evidence, type Suggestion, type Analysis, type CompanyResearch, type CompanyInsight } from "@/lib/cv";
-import { readCV, readEvidence, saveBlob } from "@/lib/import";
+import { applyDecision, cvSources, keywordReport, localAnalysis, parseCV, isEntryLine, isMeaningfulEdit, SAMPLE_CV, SAMPLE_EVIDENCE, SAMPLE_JOB, type Block, type Evidence, type Suggestion, type Analysis, type CompanyResearch, type CompanyInsight, type ReviewComment, descriptionError, isURLOnly } from "@/lib/cv";
+import { readCVDocument, readEvidence, saveBlob } from "@/lib/import";
+
+import {defaultCVStyle,blockStyle,cssFont,type CVStyle} from "@/lib/cv-style";
 
 const errorText = (e: unknown) => e instanceof Error ? e.message : "Something went wrong. Please try again.";
 type ModelContext = { registerTool: (tool: {name: string; title: string; description: string; inputSchema: object; annotations: object; execute: (input: unknown) => unknown}, options: {signal: AbortSignal}) => void | Promise<void> };
 
 export default function Workspace() {
+  const [cvStyle,setCVStyle]=useState<CVStyle>(defaultCVStyle);
+  const originalFile=useRef<{bytes:ArrayBuffer;format:string;blocks:Block[]}|null>(null);
+  const [analysisError,setAnalysisError]=useState("");
+  const [comments,setComments]=useState<ReviewComment[]>([]);
+  const [jobError,setJobError]=useState("");
   const [tab, setTab] = useState("sources");
   const [cvText, setCVText] = useState("");
   const [blocks, setBlocks] = useState<Block[]>([]), [original, setOriginal] = useState<Block[]>([]);
@@ -40,8 +47,9 @@ export default function Workspace() {
   const sources = cvSources(original.length ? original : blocks, evidence);
 
   function setCV(text: string, name = "Pasted CV") {
+    setCVStyle(defaultCVStyle());originalFile.current=null;
     const parsed = parseCV(text); setCVText(text); setBlocks(parsed); setOriginal(parsed); setFileName(name);
-    setSuggestions([]); setAnalysisMode(null); setInsights([]); setSample(false);
+    setSuggestions([]);setComments([]);setAnalysisError(""); setAnalysisMode(null); setInsights([]); setSample(false);
   }
   function decide(id: string, status: "accepted" | "rejected" | "pending") {
     const state = current.current;
@@ -66,7 +74,7 @@ export default function Workspace() {
 
   async function uploadCV(file?: File) {
     if (!file) return; setBusy("Reading your CV");
-    try {setCV(await readCV(file), file.name); setShowRaw(false); toast.success("CV imported. Check the extracted text before analyzing.");}
+    try {const document=await readCVDocument(file);setCV(document.text,file.name);setCVStyle(document.style);originalFile.current=document.bytes?{bytes:document.bytes,format:document.format,blocks:parseCV(document.text)}:null;setShowRaw(false); toast.success("CV imported. Check the extracted text before analyzing.");}
     catch (e) {toast.error(errorText(e));} finally {setBusy(""); if (cvInput.current) cvInput.current.value = "";}
   }
   async function uploadEvidence(files: File[]) {
@@ -84,7 +92,7 @@ export default function Workspace() {
     try {
       const res = await fetch(`/api/import`, {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({kind,url:kind === "job" ? jobURL : githubURL})});
       const data = await res.json() as {error?:string;text:string;sources:Evidence[];companyURL?:string}; if(!res.ok) throw new Error(data.error || "Could not read the link.");
-      if(kind === "job") {setJob(data.text);setCompanyURLState(data.companyURL||"");setResearch(null);setInsights([]);toast.success("Job imported. Check the extracted description.");if(data.companyURL)await loadCompany(data.companyURL);}
+      if(kind === "job") {setJob(data.text);setJobError("");setComments([]);setCompanyURLState(data.companyURL||"");setResearch(null);setInsights([]);toast.success("Job imported. Check the extracted description.");if(data.companyURL)await loadCompany(data.companyURL);}
       else {
         const combined = [...evidence, ...data.sources] as Evidence[];
         if(combined.length > 12 || combined.reduce((n,e)=>n+e.text.length,0)>25000) throw new Error("Evidence limit reached. Remove a source first.");
@@ -94,22 +102,23 @@ export default function Workspace() {
     } catch(e) {toast.error(errorText(e));} finally {setBusy("");}
   }
   function runChecks(){
-    if(!blocks.length||job.trim().length<40){toast.error("Add your CV and a job description first.");return;}
-    const result=localAnalysis(blocks,job,evidence);setAnalysisMode(suggestions.length?"groq":result.mode);setTab("review");setFilter("pending");toast.info("Keyword check completed. No AI edits were generated.");
+    if(!validateInputs())return;
+    setAnalysisError("");const result=localAnalysis(blocks,job,evidence);setComments(result.comments||[]);setAnalysisMode(suggestions.length?"groq":result.mode);setTab("review");setFilter("pending");toast.info("Review checks completed. Comments are marked as non-AI checks.");
   }
   async function analyze() {
+    if(isURLOnly(job)){rejectDescription();return;}
     if(!key||!keyVerified){setSettings(true);return;}
-    if(!blocks.length||job.trim().length<40){toast.error("Add your CV and a job description of at least 40 characters.");return;}
+    if(!validateInputs())return;
     try {
       let company=research;
       if(companyURL&&!company)company=await loadCompany(companyURL);
-      setBusy("Generating AI suggestions");
+      setAnalysisError("");setBusy("Reviewing your CV");
       const res=await fetch("/api/analyze",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({blocks,job,evidence,key,research:company?.sources||[],history:suggestions.map(({blockId,original,suggested,status})=>({blockId,original,suggested,status}))})});
       const data=await res.json() as Analysis&{error?:string};if(!res.ok)throw new Error(data.error||"AI analysis failed.");
       if(!suggestions.length)setOriginal(blocks);
-      setSuggestions(prev=>[...prev,...data.suggestions.map(s=>({...s,id:crypto.randomUUID()}))]);setInsights(data.insights||[]);setAnalysisMode("groq");setTab("review");setFilter("pending");
-      toast.success(data.suggestions.length?`${data.suggestions.length} new AI suggestions.`:"No additional meaningful edits were proposed. Existing decisions were kept.");
-    }catch(e){toast.error(errorText(e));}finally{setBusy("");}
+      setSuggestions(prev=>[...prev,...data.suggestions.map(s=>({...s,id:crypto.randomUUID()}))]);setComments(data.comments||[]);setInsights(data.insights||[]);setAnalysisMode("groq");setTab("review");setFilter("pending");
+      toast.success(`${data.suggestions.length} suggestions · ${data.comments?.length||0} review comments.`);
+    }catch(e){const message=errorText(e);toast.error(message);setAnalysisError(message);setComments(localAnalysis(blocks,job,evidence).comments||[]);setAnalysisMode(suggestions.length?"groq":"local");setTab("review");}finally{setBusy("");}
   }
   async function revise(id: string, comment: string) {
     if(!key||!keyVerified) {toast.info("Add a Groq key in AI settings for comment-based revisions. You can also edit the proposed wording yourself."); return;}
@@ -119,7 +128,7 @@ export default function Workspace() {
     try {
       const res = await fetch("/api/analyze",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({blocks:blocks.map(b=>b.id===suggestion.blockId?{...b,text:suggestion.original}:b),job,evidence,key,research:research?.sources||[],revision:{suggestion,comment}})});
       const data = await res.json() as Analysis & {error?:string}; if(!res.ok) throw new Error(data.error || "Revision failed.");
-      if(!data.suggestions?.length) throw new Error("No revised suggestion was returned.");
+      if(!data.suggestions?.length){setComments(data.comments||[]);toast.info("The review explains what information is needed for this revision.");return;}
       setSuggestions(prev=>prev.map(s=>s.id===id ? {...data.suggestions[0],id,status:"pending",comment} : s)); toast.success("Suggestion revised. Your CV is unchanged until you accept it.");
     } catch(e) {toast.error(errorText(e));} finally {setBusy("");}
   }
@@ -127,15 +136,21 @@ export default function Workspace() {
     setBusy("Preparing DOCX");
     try {
       const {Document, Paragraph, TextRun, Packer, HeadingLevel} = await import("docx");
-      const doc = new Document({styles:{default:{document:{run:{font:"Arial",size:22},paragraph:{spacing:{after:100}}}}},sections:[{properties:{page:{margin:{top:850,bottom:850,left:1000,right:1000}}},children:blocks.map((b,i)=>new Paragraph({heading:i===0?HeadingLevel.TITLE:b.heading?HeadingLevel.HEADING_2:undefined,children:[new TextRun({text:b.text,color:"172921",bold:b.heading})],spacing:{before:b.heading?220:0,after:100}}))}]});
+      if(originalFile.current?.format==="docx"){const {patchDOCX}=await import("@/lib/export");saveBlob(await patchDOCX(originalFile.current.bytes,originalFile.current.blocks,blocks),"tailored-cv.docx");toast.success("DOCX downloaded with the original formatting.");return;}
+      const doc = new Document({styles:{default:{document:{run:{font:cvStyle.body.fontName,size:Math.round(cvStyle.body.size*2)},paragraph:{spacing:{after:100}}}}},sections:[{properties:{page:{margin:{top:850,bottom:850,left:1000,right:1000}}},children:blocks.map((b,i)=>new Paragraph({heading:i===0?HeadingLevel.TITLE:b.heading?HeadingLevel.HEADING_2:undefined,children:[new TextRun({text:b.text,color:blockStyle(b,i,cvStyle).color,bold:blockStyle(b,i,cvStyle).bold,font:blockStyle(b,i,cvStyle).fontName,size:Math.round(blockStyle(b,i,cvStyle).size*2)})],spacing:{before:b.heading?220:0,after:100}}))}]});
       saveBlob(await Packer.toBlob(doc), "tailored-cv.docx"); toast.success("DOCX downloaded.");
     } catch(e) {toast.error(errorText(e));} finally {setBusy("");}
   }
+  async function downloadPDF(){
+    setBusy("Preparing PDF");try{const file=originalFile.current,unchanged=file&&file.format==="pdf"&&JSON.stringify(file.blocks)===JSON.stringify(blocks);if(unchanged){saveBlob(new Blob([file.bytes],{type:"application/pdf"}),"tailored-cv.pdf");}else{const {exportPDF}=await import("@/lib/export");saveBlob(new Blob([new Uint8Array(await exportPDF(blocks,cvStyle)).buffer],{type:"application/pdf"}),"tailored-cv.pdf");}toast.success("PDF downloaded without browser headers or footers.");}catch(e){toast.error(errorText(e));}finally{setBusy("");}
+  }
+  function rejectDescription(){const message=descriptionError(job)||"You pasted the wrong thing: put the URL into Job link and press Read link.";setJobError(message);toast.error(message,{position:"top-right",id:"wrong-description"});}
+  function validateInputs(){const error=descriptionError(job);if(error){setJobError(error);toast.error(error,{position:"top-right",id:"wrong-description"});return false;}if(!blocks.length){toast.error("Add your CV first.");return false;}return true;}
   function loadSample() {setCV(SAMPLE_CV,"Sample CV · Avery Chen");setJob(SAMPLE_JOB);setEvidence(SAMPLE_EVIDENCE);setSample(true);toast.info("Fictional sample loaded. No personal data or API calls.");}
   function safeDecision(id: string, status: "accepted" | "rejected" | "pending") {try {decide(id,status);} catch(e) {toast.error(errorText(e));}}
 
   return <>
-    <Toaster position="bottom-right" richColors />
+    <Toaster position="top-right" richColors />
     <header className="topbar">
       <a href="/" className="brand"><span className="brand-icon"><FileText size={22}/></span><span>CV<span className="brand-light"> Agent</span></span><span className="beta">BETA</span></a>
       <div className="header-actions"><button className="button secondary small" disabled={!!busy} onClick={()=>setSettings(true)}><Settings2 size={16}/><span>AI settings</span></button><a className="icon-button" href="https://github.com/lamanmamed/cv-agent" target="_blank" rel="noreferrer" aria-label="View source on GitHub"><Github size={20}/></a></div>
@@ -145,7 +160,7 @@ export default function Workspace() {
       <Tabs value={tab} onValueChange={setTab} className="workspace-tabs">
         <div className="workflow-bar"><TabsList className="steps" variant="line"><TabsTrigger value="sources"><span className="step-number">1</span> Add your sources</TabsTrigger><TabsTrigger value="review" disabled={!analysisMode}><span className="step-number">2</span> Review changes{pending>0&&<span className="count">{pending}</span>}</TabsTrigger><TabsTrigger value="export" disabled={!blocks.length}><span className="step-number">3</span> Export CV</TabsTrigger></TabsList><span className="mode-label">{keyVerified ? "AI ready · Groq" : "AI not connected"}</span></div>
         <TabsContent value="sources">
-          {!keyVerified&&<div className="ai-notice"><div><strong>AI is not connected</strong>Connect a Groq API key for tailored suggestions. Keyword checks work without AI.</div><button className="button secondary small" disabled={!!busy} onClick={()=>setSettings(true)}>Connect AI</button></div>}
+          {!keyVerified&&<div className="ai-notice"><div><strong>AI is not connected</strong>Connect a Groq API key for tailored suggestions. Review checks work without AI.</div><button className="button secondary small" disabled={!!busy} onClick={()=>setSettings(true)}>Connect AI</button></div>}
           <div className="sources-grid">
             <section className="panel cv-panel">
               <div className="panel-title"><span className="section-icon"><FileText size={19}/></span><div><h2>Your CV</h2><p>Upload a file or paste text.</p></div>{fileName&&<span className="pill">{sample?"Sample":"Imported"}</span>}</div>
@@ -154,7 +169,7 @@ export default function Workspace() {
                 <span className="upload-icon">{blocks.length?<FileText size={25}/>:<Upload size={25}/>}</span><strong>{fileName || "Drop your CV here"}</strong><span>{blocks.length ? "Click to replace your CV" : "or click to choose a file"}</span><small>PDF, DOCX, TXT · up to 10 MB</small>
               </button>
               <div className="split-label"><span>{blocks.length?`${blocks.length} text lines extracted`:"Prefer to paste it?"}</span><button className="text-button" disabled={!!busy} onClick={()=>setShowRaw(!showRaw)}>{showRaw?"Hide text":blocks.length?"Check extracted text":"Paste CV text"}</button></div>
-              {showRaw&&<label className="field"><span>CV text</span><textarea className="cv-text-input" value={cvText} maxLength={25000} disabled={!!busy} onChange={e=>setCV(e.target.value)} placeholder="Paste your CV, including section headings…" /></label>}
+              {showRaw&&<label className="field"><span>CV text</span><textarea className="cv-text-input" value={cvText} maxLength={25000} disabled={!!busy} onChange={e=>{const importedStyle=cvStyle;setCV(e.target.value,fileName);setCVStyle({...importedStyle,blocks:{}});}} placeholder="Paste your CV, including section headings…" /></label>}
               {blocks.length>0&&!showRaw&&<div className="mini-preview"><p className="preview-label">TEXT PREVIEW</p>{blocks.slice(0,5).map(b=><p className={b.heading?"mini-heading":""} key={b.id}>{b.text}</p>)}{blocks.length>5&&<span className="muted">+ {blocks.length-5} more lines</span>}</div>}
               <div className="source-note"><p>Files are read in your browser. They aren’t stored on our server. AI mode sends extracted text to Groq when you request an analysis.</p></div>
             </section>
@@ -162,7 +177,7 @@ export default function Workspace() {
               <section className="panel job-panel"><div className="panel-title"><span className="section-icon blue"><BriefcaseBusiness size={19}/></span><div><h2>Job and company</h2><p>Read the job link first, then check the extracted text.</p></div></div>
                 <label className="field"><span>Job link</span><div className="input-action"><Link2 size={16}/><input type="url" value={jobURL} disabled={!!busy} onChange={e=>setJobURL(e.target.value)} placeholder="https://company.com/careers/role"/><button className="button secondary small" disabled={!!busy||!jobURL} onClick={()=>importLink("job")}>Read link</button></div></label>
                 <p className="small-note reader-note">Public HTTPS pages are supported. Some websites require a login or block automated reading.</p>
-                <label className="field"><span>Job description <span className="optional">paste or edit</span></span><textarea value={job} disabled={!!busy} maxLength={15000} onChange={e=>{setJob(e.target.value);setAnalysisMode(null);}} placeholder="The extracted description will appear here. You can also paste it directly." className="job-input" /></label>
+                <label className="field"><span>Job description <span className="optional">paste or edit</span></span><textarea value={job} disabled={!!busy} maxLength={15000} onChange={e=>{setJob(e.target.value);setJobError(isURLOnly(e.target.value)?"You pasted the wrong thing: put the URL into Job link and press Read link.":"");setComments([]);setAnalysisMode(null);}} onBlur={()=>{if(isURLOnly(job))rejectDescription();}} placeholder="The extracted description will appear here. You can also paste it directly." aria-invalid={!!jobError} aria-describedby={jobError?"job-description-error":undefined} onPaste={e=>{const text=e.clipboardData.getData("text");if(isURLOnly(text)){e.preventDefault();setJobError("You pasted the wrong thing: put the URL into Job link and press Read link.");toast.error("You pasted the wrong thing: put the URL into Job link and press Read link.",{position:"top-right",id:"wrong-description"});}}} className="job-input" />{jobError&&<span id="job-description-error" role="alert" className="field-error">{jobError}</span>}</label>
                 <CompanySources companyURL={companyURL} setCompanyURL={setCompanyURL} research={research} disabled={!!busy} onResearch={()=>loadCompany(companyURL)}/>
               </section>
               <section className="panel evidence-panel"><div className="panel-title"><span className="section-icon purple"><Layers size={19}/></span><div><h2>Project evidence</h2><p>GitHub READMEs, project files, and documents.</p></div><span className="optional">OPTIONAL</span></div>
@@ -174,36 +189,39 @@ export default function Workspace() {
               </section>
             </div>
           </div>
-          <div className="analyze-bar"><div><p><strong>{keyVerified?"AI analysis":"AI connection required"}</strong><span>{keyVerified?"Uses the job, project evidence, and available company sources.":"Connect a free-plan Groq key to generate tailored edits."}</span></p></div><div className="analyze-options"><button className="text-button" disabled={!!busy||!blocks.length||job.trim().length<40} onClick={runChecks}>Check keywords only</button><button className="button primary analyze-button" onClick={analyze} disabled={!!busy||(keyVerified&&(!blocks.length||job.trim().length<40))}>{busy?<LoaderCircle className="spin" size={19}/>:<Sparkles size={19}/>} {busy||(keyVerified?"Generate AI suggestions":"Connect AI")}</button></div></div>
+          <div className="analyze-bar"><div><p><strong>{keyVerified?"AI analysis":"AI connection required"}</strong><span>{keyVerified?"Uses the job, project evidence, and available company sources.":"Connect a free-plan Groq key to generate tailored edits."}</span></p></div><div className="analyze-options"><button className="text-button" disabled={!!busy||!blocks.length||job.trim().length<40} onClick={runChecks}>Review checks</button><button className="button primary analyze-button" onClick={analyze} disabled={!!busy||(keyVerified&&(!blocks.length||job.trim().length<40))}>{busy?<LoaderCircle className="spin" size={19}/>:<Sparkles size={19}/>} {busy||(keyVerified?"Review CV":"Connect AI")}</button></div></div>
         </TabsContent>
         <TabsContent value="review">
-          <div className="review-summary"><div><h2>Review suggestions</h2><p>{analysisMode==="local"?"Keyword check only. No AI-generated edits. Connect Groq to tailor your CV.":"AI-generated edits based on this job and your sources. Accept, reject, or revise each one."}</p></div><span className="review-count"><strong>{accepted}</strong> / {suggestions.length} accepted</span></div>
+          <div className="review-summary"><div><h2>Suggestions and comments</h2><p>{analysisMode==="local"?"Non-AI checks and questions. Connect Groq for an AI review.":"Review of this job and your sources. Accept, reject, or revise suggestions; comments explain what needs clarification."}</p></div><span className="review-count"><strong>{accepted}</strong> / {suggestions.length} accepted</span></div>
+          {analysisError&&<p className="connection-error" role="alert">AI review could not complete: {analysisError} The comments below come from non-AI checks.</p>}
           <div className="review-grid">
-            <section className="document-panel"><div className="document-toolbar"><span><FileText size={16}/> Your current CV</span><span>{accepted ? `${accepted} approved changes` : "Original text"}</span></div><CVDocument blocks={blocks} suggestions={suggestions}/><p className="paper-caption">Single-column template · selectable text · only approved edits</p></section>
+            <section className="document-panel"><div className="document-toolbar"><span><FileText size={16}/> Your current CV</span><span>{accepted ? `${accepted} approved changes` : "Original text"}</span></div><CVDocument blocks={blocks} suggestions={suggestions} style={cvStyle}/><p className="paper-caption">Imported style · only approved edits</p></section>
             <section className="suggestions-panel">
               {insights.length>0&&research&&<section className="insights-panel"><h3>Company context</h3>{insights.map((insight,i)=><div key={i} className="company-insight"><p>{insight.point}</p><details><summary>Source</summary><blockquote>{insight.quote}</blockquote><a href={research.sources.find(r=>r.id===insight.sourceId)?.url} target="_blank" rel="noreferrer">{research.sources.find(r=>r.id===insight.sourceId)?.title}</a></details></div>)}</section>}
+              {comments.length>0&&<section className="review-comments"><h3>Review comments</h3>{comments.map(c=><article className="review-comment" key={c.id}><div><MessageSquare size={16}/><strong>{c.kind==="question"?"Clarify":c.kind==="strength"?"What works":"Observation"}</strong><span>{c.origin==="ai"?"AI review":"Review check"}</span></div>{c.blockId&&<blockquote>{blocks.find(b=>b.id===c.blockId)?.text}</blockquote>}<p>{c.text}</p></article>)}</section>}
               <div className="keyword-panel"><div className="keyword-title"><h3>Job keyword coverage</h3><span>{report.matched.length} / {report.requirements.length} found in CV</span></div>
                 <div className="keyword-tags">{report.matched.map(s=><span className="keyword matched" key={s}><Check size={12}/>{s}</span>)}{report.evidenceOnly.map(s=><span className="keyword evidence" key={s}>{s} · in evidence</span>)}{report.missing.map(s=><span className="keyword missing" key={s}>{s} · gap</span>)}</div>
                 <p>Technical term scan, not an ATS score. A mention in project evidence needs your confirmation before becoming a CV claim.</p>
               </div>
-              <Tabs value={filter} onValueChange={setFilter}><TabsList className="review-filters"><TabsTrigger value="pending">To review ({pending})</TabsTrigger><TabsTrigger value="all">All changes ({suggestions.length})</TabsTrigger></TabsList><TabsContent value={filter}>
+              {suggestions.length>0&&<Tabs value={filter} onValueChange={setFilter}><TabsList className="review-filters"><TabsTrigger value="pending">To review ({pending})</TabsTrigger><TabsTrigger value="all">All changes ({suggestions.length})</TabsTrigger></TabsList><TabsContent value={filter}>
                 <div className="suggestion-list">{suggestions.filter(s=>filter==="all"||s.status==="pending").map((s,i)=><SuggestionCard key={s.id} suggestion={s} index={i+1} section={original.find(b=>b.id===s.blockId)?.section||"CV"} sources={sources} disabled={!!busy} onDecision={status=>safeDecision(s.id,status)} onRevise={comment=>revise(s.id,comment)} onEdit={text=>setSuggestions(prev=>prev.map(item=>item.id===s.id?{...item,suggested:text,reason:"Wording edited by you. Confirm the claims before accepting."}:item))}/>)}</div>
-                {(filter==="pending"?pending===0:suggestions.length===0)&&<div className="empty-review"><Check size={28}/><h3>{suggestions.length?"All changes reviewed":analysisMode==="local"?"Keyword check complete":"No substantial edits proposed"}</h3><p>{suggestions.length?"Your approved changes are in the CV. You can undo a decision under All changes.":analysisMode==="local"?"This check does not use AI or rewrite your CV. Connect AI to generate tailored suggestions.":"The AI did not find additional supported changes. Your existing review decisions were retained."}</p><button className="button primary" onClick={()=>setTab("export")}>Continue to export</button></div>}
-              </TabsContent></Tabs>
+                {suggestions.length>0&&filter==="pending"&&pending===0&&<div className="empty-review"><h3>All suggestions reviewed</h3><p>Your decisions are saved for this session. Review comments remain available above.</p><button className="button secondary" onClick={()=>setTab("export")}>Continue to export</button></div>}
+
+              </TabsContent></Tabs>}
             </section>
           </div>
         </TabsContent>
         <TabsContent value="export">
-          <div className="export-grid"><section><h2 className="export-heading">Export CV</h2><p className="export-copy">Download the CV with your approved changes in a clean, single-column format. Unreviewed suggestions are excluded.</p><div className="export-status"><Check size={18}/>{accepted} changes accepted{pending>0&&<span> · {pending} still pending</span>}</div>
-            <div className="export-actions"><button className="button primary" onClick={exportDOCX} disabled={!!busy}><Download size={18}/> Download DOCX</button><button className="button secondary" onClick={()=>window.print()} disabled={!!busy}><FileText size={18}/> Print / Save as PDF</button><button className="text-button" onClick={()=>saveBlob(new Blob([blocks.map(b=>b.text).join("\n")],{type:"text/plain;charset=utf-8"}),"tailored-cv.txt")}><Download size={16}/> Download plain text</button></div>
-            <div className="export-note"><h3>Export format</h3><p>Standard headings, readable text, and no tables or graphics. The original layout is replaced by this template. Review the print preview for page breaks.</p></div>
-            <button className="text-button" onClick={()=>saveBlob(new Blob([JSON.stringify({version:2,cv:blocks,original,suggestions,evidence,job,research,insights},null,2)],{type:"application/json"}),"cv-agent-review.json")}><Download size={16}/> Save review history</button><p className="small-note">This session is temporary. Download your work before closing the tab. Review history contains your CV, job text, and evidence.</p>
-          </section><section className="document-panel"><CVDocument blocks={blocks} suggestions={[]}/></section></div>
+          <div className="export-grid"><section><h2 className="export-heading">Export CV</h2><p className="export-copy">Download your CV with approved edits and styling adapted from your upload. Suggestions and comments stay outside the document.</p><div className="export-status"><Check size={18}/>{accepted} changes accepted{pending>0&&<span> · {pending} still pending</span>}</div>
+            <div className="export-actions"><button className="button primary" onClick={exportDOCX} disabled={!!busy}><Download size={18}/> Download DOCX</button><button className="button secondary" onClick={downloadPDF} disabled={!!busy}><FileText size={18}/> Download PDF</button><button className="text-button" onClick={()=>saveBlob(new Blob([blocks.map(b=>b.text).join("\n")],{type:"text/plain;charset=utf-8"}),"tailored-cv.txt")}><Download size={16}/> Download plain text</button></div>
+            <div className="export-note"><h3>Export format</h3><p>An unchanged PDF is returned in its original layout. Edited PDFs use the detected font family, sizes, alignment, and heading style; complex layouts may reflow. DOCX uploads retain their original formatting. No browser timestamps, page URLs, or app branding are added.</p></div>
+            <button className="text-button" onClick={()=>saveBlob(new Blob([JSON.stringify({version:3,cv:blocks,original,suggestions,comments,evidence,job,research,insights,cvStyle},null,2)],{type:"application/json"}),"cv-agent-review.json")}><Download size={16}/> Save review history</button><p className="small-note">This session is temporary. Download your work before closing the tab. Review history contains your CV, job text, and evidence.</p>
+          </section><section className="document-panel"><CVDocument blocks={blocks} suggestions={[]} style={cvStyle}/></section></div>
         </TabsContent>
       </Tabs>
       <footer className="footer"><span>CV Agent</span><p>Job alignment and formatting guidance. No universal ATS score or guaranteed outcome.</p><a href="https://github.com/lamanmamed/cv-agent" target="_blank" rel="noreferrer">Source code <Github size={14}/></a></footer>
     </main>
-    <div className="print-only"><CVDocument blocks={blocks} suggestions={[]}/></div>
+    <div className="print-only"><CVDocument blocks={blocks} suggestions={[]} style={cvStyle}/></div>
     <Dialog open={settings} onOpenChange={setSettings}><DialogContent className="settings-dialog"><DialogTitle>Connect AI</DialogTitle><DialogDescription>AI tailoring uses Groq. Create a free-plan account, generate an API key, and connect it here.</DialogDescription><label className="field"><span>Groq API key</span><input type="password" autoComplete="off" disabled={!!busy} value={key} onChange={e=>{setKey(e.target.value.trim());setKeyVerified(false);setConnectionError("");}} placeholder="gsk_…"/></label><p className="small-note">Testing the key checks model access without generating text. During AI analysis, CV and project text is sent to Groq. The key stays in this tab’s memory.</p><p className="small-note">Job and company URLs are read through Jina Reader. CV files are not sent to that reader. Keep your Groq account on the free plan if you want to avoid paid inference.</p>{connectionError&&<p role="alert" className="connection-error">{connectionError}</p>}<a href="https://console.groq.com/keys" target="_blank" rel="noreferrer" className="text-button">Create a Groq key</a><div className="dialog-actions"><button className="button secondary" disabled={!!busy} onClick={()=>{setKey("");setKeyVerified(false);setSettings(false);}}>Disconnect</button><button className="button primary" disabled={!!busy||key.length<10} onClick={verifyKey}>{busy?"Testing…":"Test and connect"}</button></div></DialogContent></Dialog>
   </>;
 }
@@ -218,10 +236,11 @@ function ChangeText({before,after,side}:{before:string;after:string;side:"before
   const words=side==="before"?a:b,prefix=words.slice(0,start).join(" "),middle=words.slice(start,words.length-end).join(" "),suffix=end?words.slice(-end).join(" "):"";
   return <>{prefix}{prefix&&middle?" ":""}{middle&&(side==="before"?<del className="change-del">{middle}</del>:<ins className="change-ins">{middle}</ins>)}{suffix&&(prefix||middle)?" ":""}{suffix}</>;
 }
-function CVDocument({blocks,suggestions}:{blocks:Block[];suggestions:Suggestion[]}) {
-  return <article className="cv-paper" aria-label="CV preview">{blocks.map((b,i)=>{
+function CVDocument({blocks,suggestions,style}:{blocks:Block[];suggestions:Suggestion[];style:CVStyle}) {
+  return <article className="cv-paper imported-style" style={{fontFamily:cssFont(style.body),lineHeight:style.lineHeight,padding:`${style.margin*96/72*.6}px`}} aria-label="CV preview">{blocks.map((b,i)=>{
+    const textStyle=blockStyle(b,i,style),appearance={fontFamily:cssFont(textStyle),fontSize:`${textStyle.size*96/72}px`,fontWeight:textStyle.bold?700:400,fontStyle:textStyle.italic?"italic":"normal",color:`#${textStyle.color}`,textAlign:textStyle.align,letterSpacing:0,lineHeight:style.lineHeight};
     const changed = suggestions.some(s=>s.blockId===b.id&&s.status==="accepted"),bullet=/^[•●▪\-*]\s*/.test(b.text);
-    return i===0?<h2 className="cv-name" key={b.id}>{b.text}</h2>:b.heading?<h3 className="cv-heading" key={b.id}>{b.text.replace(/:$/,"")}</h3>:<p key={b.id} className={`${b.section==="Profile"?"cv-contact":bullet?"cv-line cv-bullet":isEntryLine(b.text)?"cv-line cv-entry":"cv-line"} ${changed?"approved-line":""}`}>{bullet?<><span className="bullet-marker">•</span><span>{b.text.replace(/^[•●▪\-*]\s*/,"")}</span></>:b.text}</p>;
+    return i===0?<h2 className="cv-name" style={appearance} key={b.id}>{b.text}</h2>:b.heading?<h3 className="cv-heading" style={{...appearance,borderBottom:style.headingRule?`1px solid #${textStyle.color}`:"none"}} key={b.id}>{b.text.replace(/:$/,"")}</h3>:<p key={b.id} style={appearance} className={`${b.section==="Profile"?"cv-contact":bullet?"cv-line cv-bullet":isEntryLine(b.text)?"cv-line cv-entry":"cv-line"} ${changed?"approved-line":""}`}>{bullet?<><span className="bullet-marker">•</span><span>{b.text.replace(/^[•●▪\-*]\s*/,"")}</span></>:b.text}</p>;
   })}</article>;
 }
 function SuggestionCard({suggestion:s,index,section,sources,disabled,onDecision,onRevise,onEdit}:{suggestion:Suggestion;index:number;section:string;sources:Evidence[];disabled:boolean;onDecision:(status:"accepted"|"rejected"|"pending")=>void;onRevise:(comment:string)=>void;onEdit:(text:string)=>void}) {

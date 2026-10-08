@@ -1,5 +1,5 @@
 export type PDFTextItem = {str:string;transform:number[];width:number;hasEOL?:boolean};
-export function pdfItemsToText(items:PDFTextItem[]) {
+export function pdfRows(items:PDFTextItem[]) {
   const rows:{y:number;height:number;items:PDFTextItem[]}[]=[];
   for(const item of items){
     if(!item.str.trim())continue;
@@ -15,6 +15,9 @@ export function pdfItemsToText(items:PDFTextItem[]) {
       const space=text&&!/\s$/.test(text)&&!/^\s/.test(item.str)&&gap>row.height*.12?" ":"";
       text+=space+item.str;endX=item.transform[4]+item.width;
     }
-    return text.replace(/\s+/g," ").trim();
-  }).filter(Boolean).join("\n");
+    const x=row.items[0].transform[4],width=Math.max(...row.items.map(i=>i.transform[4]+i.width))-x;
+    return {...row,x,width,text:text.replace(/\s+/g," ").trim()};
+  }).filter(row=>row.text);
 }
+
+export function pdfItemsToText(items:PDFTextItem[]){return pdfRows(items).map(row=>row.text).join("\n");}
