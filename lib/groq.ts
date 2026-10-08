@@ -1,3 +1,6 @@
+export function savedGroqKey(){return process.env.GROQ_API_KEY?.trim()||"";}
+export function reviewKey(key?:string){return key?.trim()||savedGroqKey();}
+
 export const GROQ_MODEL = "openai/gpt-oss-20b";
 
 export class GroqError extends Error {

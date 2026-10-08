@@ -25,7 +25,26 @@ export default function Workspace() {
   const [job, setJob] = useState(""), [jobURL, setJobURL] = useState(""), [githubURL, setGithubURL] = useState("");
   const [evidence, setEvidence] = useState<Evidence[]>([]);
   const [companyURL,setCompanyURLState]=useState(""),[research,setResearch]=useState<CompanyResearch|null>(null),[insights,setInsights]=useState<CompanyInsight[]>([]);
+  const startupConnection=useRef<AbortController|null>(null);
+  const [savedKey,setSavedKey]=useState(false);
   const [keyVerified,setKeyVerified]=useState(false),[connectionError,setConnectionError]=useState("");
+  useEffect(()=>{
+    const controller=new AbortController();startupConnection.current=controller;
+    void (async()=>{
+      try{
+        const status=await fetch("/api/ai-status",{signal:controller.signal});
+        const config=await status.json() as {configured?:boolean};
+        if(!status.ok||!config.configured||controller.signal.aborted)return;
+        setSavedKey(true);
+        const response=await fetch("/api/ai-status",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}",signal:controller.signal});
+        const result=await response.json() as {connected?:boolean;error?:string};
+        if(controller.signal.aborted)return;
+        if(response.ok&&result.connected)setKeyVerified(true);
+        else setConnectionError(result.error||"The saved AI connection could not be verified.");
+      }catch{/* Manual connection remains available when the startup test cannot finish. */}
+    })();
+    return ()=>controller.abort();
+  },[]);
   function setCompanyURL(value:string){setCompanyURLState(value);setResearch(null);setInsights([]);}
   async function loadCompany(url:string){
     if(!url.trim())return null;setBusy("Reading company sources");
@@ -33,7 +52,7 @@ export default function Workspace() {
     catch(e){toast.error(errorText(e));return null;}finally{setBusy("");}
   }
   async function verifyKey(){
-    setBusy("Checking AI connection");setConnectionError("");
+    startupConnection.current?.abort();setBusy("Checking AI connection");setConnectionError("");
     try {const res=await fetch("/api/ai-status",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key})});const data=await res.json() as {error?:string;connected?:boolean};if(!res.ok||!data.connected)throw new Error(data.error||"The AI connection could not be verified.");setKeyVerified(true);setSettings(false);setAnalysisError("");toast.success("AI generation tested. Your connection is ready.");}
     catch(e){setKeyVerified(false);setConnectionError(errorText(e));}finally{setBusy("");}
   }
@@ -107,7 +126,7 @@ export default function Workspace() {
   }
   async function analyze() {
     if(isURLOnly(job)){rejectDescription();return;}
-    if(!key||!keyVerified){setSettings(true);return;}
+    if((!key&&!savedKey)||!keyVerified){setSettings(true);return;}
     if(!validateInputs())return;
     try {
       let company=research;
@@ -121,7 +140,7 @@ export default function Workspace() {
     }catch(e){const message=errorText(e);toast.error(message);setAnalysisError(message);}finally{setBusy("");}
   }
   async function revise(id: string, comment: string) {
-    if(!key||!keyVerified) {toast.info("Add a Groq key in AI settings for comment-based revisions. You can also edit the proposed wording yourself."); return;}
+    if((!key&&!savedKey)||!keyVerified) {toast.info("Add a Groq key in AI settings for comment-based revisions. You can also edit the proposed wording yourself."); return;}
     if(!comment.trim()) {toast.error("Add a comment explaining what to change."); return;}
     const suggestion = suggestions.find(s=>s.id===id); if(!suggestion || suggestion.status !== "pending") return;
     setBusy(`Revising ${id}`);
@@ -222,7 +241,7 @@ export default function Workspace() {
       <footer className="footer"><span>CV Agent</span><p>Job alignment and formatting guidance. No universal ATS score or guaranteed outcome.</p><a href="https://github.com/lamanmamed/cv-agent" target="_blank" rel="noreferrer">Source code <Github size={14}/></a></footer>
     </main>
     <div className="print-only"><CVDocument blocks={blocks} suggestions={[]} style={cvStyle}/></div>
-    <Dialog open={settings} onOpenChange={setSettings}><DialogContent className="settings-dialog"><DialogTitle>Connect AI</DialogTitle><DialogDescription>AI tailoring uses Groq. Create a free-plan account, generate an API key, and connect it here.</DialogDescription><label className="field"><span>Groq API key</span><input type="password" autoComplete="off" disabled={!!busy} value={key} onChange={e=>{setKey(e.target.value.trim());setKeyVerified(false);setConnectionError("");}} placeholder="gsk_…"/></label><p className="small-note">Testing runs a small AI generation request using fictional data and the review format; it uses your Groq quota. During AI analysis, CV and project text is sent to Groq. The key stays in this tab’s memory.</p><p className="small-note">Job and company URLs are read through Jina Reader. CV files are not sent to that reader. Keep your Groq account on the free plan if you want to avoid paid inference.</p>{connectionError&&<p role="alert" className="connection-error">{connectionError}</p>}<a href="https://console.groq.com/keys" target="_blank" rel="noreferrer" className="text-button">Create a Groq key</a><div className="dialog-actions"><button className="button secondary" disabled={!!busy} onClick={()=>{setKey("");setKeyVerified(false);setSettings(false);}}>Disconnect</button><button className="button primary" disabled={!!busy||key.length<10} onClick={verifyKey}>{busy?"Testing…":"Test and connect"}</button></div></DialogContent></Dialog>
+    <Dialog open={settings} onOpenChange={setSettings}><DialogContent className="settings-dialog"><DialogTitle>Connect AI</DialogTitle><DialogDescription>AI tailoring uses Groq. Create a free-plan account, generate an API key, and connect it here.</DialogDescription>{savedKey&&<p className="small-note">A key is saved securely for this private app. Test it below, or enter another key for this session.</p>}<label className="field"><span>Groq API key</span><input type="password" autoComplete="off" disabled={!!busy} value={key} onChange={e=>{startupConnection.current?.abort();setKey(e.target.value.trim());setKeyVerified(false);setConnectionError("");}} placeholder="gsk_…"/></label><p className="small-note">Testing runs a small AI generation request using fictional data and the review format; it uses your Groq quota. During AI analysis, CV and project text is sent to Groq. A key entered here stays in this tab’s memory. A saved key is used by the server and is never sent to your browser.</p><p className="small-note">Job and company URLs are read through Jina Reader. CV files are not sent to that reader. Keep your Groq account on the free plan if you want to avoid paid inference.</p>{connectionError&&<p role="alert" className="connection-error">{connectionError}</p>}<a href="https://console.groq.com/keys" target="_blank" rel="noreferrer" className="text-button">Create a Groq key</a><div className="dialog-actions"><button className="button secondary" disabled={!!busy} onClick={()=>{startupConnection.current?.abort();setKey("");setKeyVerified(false);setSettings(false);}}>Disconnect</button><button className="button primary" disabled={!!busy||(key.length<10&&!savedKey)} onClick={verifyKey}>{busy?"Testing…":"Test and connect"}</button></div></DialogContent></Dialog>
   </>;
 }
 

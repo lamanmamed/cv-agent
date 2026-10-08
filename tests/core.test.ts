@@ -11,8 +11,20 @@ import {exportPDF} from "../lib/export.ts";
 import {readFile} from "node:fs/promises";
 import {PDFDocument} from "pdf-lib";
 import {POST as analyzeRequest} from "../app/api/analyze/route.ts";
-import {POST as connectionRequest} from "../app/api/ai-status/route.ts";
+import {POST as connectionRequest,GET as savedConnectionStatus} from "../app/api/ai-status/route.ts";
+import {verifyReviewEdits} from "../lib/verify-review.ts";
 import {outputJSON} from "../lib/ai-review-schema.ts";
+
+// Route fixtures model the separate semantic-verification response as well as generation.
+const mockVerifiedReview=(generate:typeof fetch):typeof fetch=>async(input,options)=>{
+  const body=typeof options?.body==="string"?JSON.parse(options.body):null;
+  if(body?.response_format?.json_schema?.schema?.properties?.checks){
+    const context=JSON.parse(body.messages[1].content);
+    return Response.json({choices:[{message:{content:JSON.stringify({checks:context.proposals.map((p:{blockId:string})=>({blockId:p.blockId,supported:true,reason:"The wording preserves the facts documented in the original CV line."}))})}}]});
+  }
+  return generate(input,options);
+};
+
 function reviewFixture():Suggestion[]{
   const block=parseCV(SAMPLE_CV).find(b=>b.text.includes("Responsible for analyzing"))!;
   return [{id:"test-edit",blockId:block.id,original:block.text,suggested:"• Analyzed customer data using Python and SQL.",reason:"Clarifies the documented analysis contribution.",status:"pending",citations:[{sourceId:block.id,quote:block.text}]}];
@@ -94,11 +106,11 @@ test("analysis requests reject cross-origin and oversized bodies",async()=>{
 
 test("AI endpoint calls Groq, validates grounding, and suppresses reviewed edits",async()=>{
   const originalFetch=globalThis.fetch,blocks=parseCV(SAMPLE_CV),edit={...reviewFixture()[0],jobRequirement:"Requirements: Python, SQL, PyTorch, statistics, and data visualization."};let calls=0;
-  globalThis.fetch=async(input,options)=>{
+  globalThis.fetch=mockVerifiedReview(async(input,options)=>{
     calls++;assert.equal(String(input),"https://api.groq.com/openai/v1/chat/completions");
     const body=JSON.parse(String(options?.body));assert.equal(body.model,"openai/gpt-oss-20b");assert.equal(body.response_format.type,"json_schema");
     return Response.json({choices:[{message:{content:JSON.stringify({suggestions:[edit],comments:[{blockId:edit.blockId,kind:"question",text:"What outcome can you substantiate for this Python and SQL analysis?"}],insights:[]})}}]});
-  };
+  });
   const send=(extra:object={})=>analyzeRequest(new Request("https://cv.example/api/analyze",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({blocks,job:SAMPLE_JOB,evidence:[],key:"test-key-no-real-secret",...extra})}));
   try {
     const success=await send();assert.equal(success.status,200);const data=await success.json() as {mode:string;suggestions:unknown[]};assert.equal(data.mode,"groq");assert.equal(data.suggestions.length,1);
@@ -120,7 +132,7 @@ test("public reader uses Workers-compatible manual redirects",async()=>{
 });
 test("empty AI reviews fail explicitly, and one invalid edit does not discard a valid edit",async()=>{
   const originalFetch=globalThis.fetch,blocks=parseCV(SAMPLE_CV),valid={...reviewFixture()[0],jobRequirement:"Requirements: Python, SQL, PyTorch, statistics, and data visualization."};let output:object={suggestions:[],comments:[],insights:[]};
-  globalThis.fetch=async()=>Response.json({choices:[{message:{content:JSON.stringify(output)}}]});
+  globalThis.fetch=mockVerifiedReview(async()=>Response.json({choices:[{message:{content:JSON.stringify(output)}}]}));
   const send=()=>analyzeRequest(new Request("https://cv.example/api/analyze",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({blocks,job:SAMPLE_JOB,evidence:[],key:"test-key-no-real-secret"})}));
   try{let response=await send();let data=await response.json() as {suggestions:unknown[];comments:unknown[];code?:string};assert.equal(response.status,502);assert.equal(data.code,"GROQ_EMPTY_REVIEW");assert.equal(data.comments,undefined);
     output={suggestions:[{...valid,jobRequirement:"Made up requirement outside the job"},valid],comments:[],insights:[]};response=await send();data=await response.json() as typeof data;assert.equal(response.status,200);assert.equal(data.suggestions.length,1);assert.ok(data.comments.length>0);
@@ -202,7 +214,7 @@ test("an empty review is repaired by AI and a comments-only response is genuinel
 
 test("all blocked edits get one grounding repair while unsupported facts remain blocked",async()=>{
   const originalFetch=globalThis.fetch,valid={...reviewFixture()[0],jobRequirement:""};let calls=0;
-  globalThis.fetch=async(_input,options)=>{calls++;const body=JSON.parse(String(options?.body));if(calls===2)assert.match(body.messages[0].content,/unsupported number/);return completion({suggestions:[calls===1?{...valid,suggested:valid.suggested+" Increased revenue by 47%."}:valid],comments:[],insights:[]});};
+  globalThis.fetch=mockVerifiedReview(async(_input,options)=>{calls++;const body=JSON.parse(String(options?.body));if(calls===2)assert.match(body.messages[0].content,/unsupported number/);return completion({suggestions:[calls===1?{...valid,suggested:valid.suggested+" Increased revenue by 47%."}:valid],comments:[],insights:[]});});
   try{const response=await analyzeRequest(reviewRequest());const data=await endpointResult(response);assert.equal(response.status,200);assert.equal(data.suggestions?.length,1);assert.equal(data.suggestions?.[0]?.suggested,valid.suggested);assert.equal(calls,2);}
   finally{globalThis.fetch=originalFetch;}
 });
@@ -226,7 +238,45 @@ test("truncated and malformed completions get at most one bounded repair",async(
 
 test("a revision repairs only its pending block and never changes the original CV",async()=>{
   const originalFetch=globalThis.fetch,blocks=parseCV(SAMPLE_CV),suggestion={...reviewFixture()[0],jobRequirement:""};const before=structuredClone(blocks);let calls=0;
-  globalThis.fetch=async()=>{calls++;return completion({suggestions:[{...suggestion,blockId:calls===1?"wrong-block":suggestion.blockId}],comments:[],insights:[]});};
+  globalThis.fetch=mockVerifiedReview(async()=>{calls++;return completion({suggestions:[{...suggestion,blockId:calls===1?"wrong-block":suggestion.blockId}],comments:[],insights:[]});});
   try{const response=await analyzeRequest(reviewRequest({blocks,revision:{suggestion,comment:"Make the contribution clearer."}}));const data=await endpointResult(response);assert.equal(response.status,200);assert.equal(data.suggestions?.length,1);assert.equal(data.suggestions?.[0]?.blockId,suggestion.blockId);assert.equal(data.suggestions?.[0]?.status,"pending");assert.deepEqual(blocks,before);assert.equal(calls,2);}
   finally{globalThis.fetch=originalFetch;}
+});
+
+test("semantic verification rejects invented business impact, notebook baselines and employer divisions",async()=>{
+  const originalFetch=globalThis.fetch,valid=reviewFixture()[0];let calls=0;
+  const invented=[
+    {...valid,blockId:"impact",suggested:"Analyzed data to identify retention drivers and inform roadmap decisions."},
+    {...valid,blockId:"baseline",original:"Compared model performance and documented experiment results.",suggested:"Compared against logistic regression in a reproducible Jupyter notebook."},
+    {...valid,blockId:"division",original:"Data Science Intern · Northstar Analytics",suggested:"Data Science Intern · Northstar Analytics – Healthcare Analytics Division"},
+  ];
+  globalThis.fetch=async(_input,options)=>{calls++;const body=JSON.parse(String(options?.body));const context=JSON.parse(body.messages[1].content);assert.equal(context.proposals.length,4);assert.equal(context.jobDescription,undefined);assert.equal(context.companySources,undefined);assert.ok(context.proposals.every((p:{evidence:unknown[]})=>Array.isArray(p.evidence)));
+    return completion({checks:[{blockId:valid.blockId,supported:true,reason:"Preserves the documented Python and SQL analysis contribution."},...invented.map(e=>({blockId:e.blockId,supported:false,reason:"This detail is not documented in the cited source. What evidence confirms it?"}))]});
+  };
+  try{const result=await verifyReviewEdits(testKey,[valid,...invented]);assert.deepEqual(result.suggestions,[valid]);assert.equal(result.comments.length,3);assert.ok(result.comments.every(c=>c.origin==="ai"));assert.equal(calls,1);}
+  finally{globalThis.fetch=originalFetch;}
+});
+
+test("missing or duplicate verification decisions never approve an edit",async()=>{
+  const originalFetch=globalThis.fetch,edit=reviewFixture()[0];
+  try{for(const checks of [[],[{blockId:edit.blockId,supported:true,reason:"Documented facts were preserved."},{blockId:edit.blockId,supported:true,reason:"Documented facts were preserved."}]]){
+    globalThis.fetch=async()=>completion({checks});const result=await verifyReviewEdits(testKey,[edit]);assert.deepEqual(result.suggestions,[]);assert.equal(result.comments.length,1);
+  }
+    globalThis.fetch=async()=>completion({suggestions:[]});await assert.rejects(()=>verifyReviewEdits(testKey,[edit]),/could not verify/);
+  }finally{globalThis.fetch=originalFetch;}
+});
+
+test("the server uses its saved key without revealing it in configuration or connection responses",async()=>{
+  const originalFetch=globalThis.fetch,previous=process.env.GROQ_API_KEY;let calls=0;process.env.GROQ_API_KEY=testKey;
+  globalThis.fetch=async(_input,options)=>{calls++;assert.equal((options?.headers as Record<string,string>).Authorization,`Bearer ${testKey}`);const body=JSON.parse(String(options?.body));return completion(JSON.parse(body.messages[1].content));};
+  try{
+    const config=await savedConnectionStatus().json();assert.deepEqual(config,{configured:true});assert.ok(!JSON.stringify(config).includes(testKey));
+    const response=await connectionRequest(new Request("https://cv.example/api/ai-status",{method:"POST",headers:{"content-type":"application/json"},body:"{}"}));const data=await endpointResult(response);assert.equal(response.status,200);assert.equal(data.connected,true);assert.ok(!JSON.stringify(data).includes(testKey));assert.equal(calls,1);
+  }finally{globalThis.fetch=originalFetch;if(previous===undefined)delete process.env.GROQ_API_KEY;else process.env.GROQ_API_KEY=previous;}
+});
+
+test("no saved key produces a clear unconfigured error without a provider call",async()=>{
+  const originalFetch=globalThis.fetch,previous=process.env.GROQ_API_KEY;let calls=0;delete process.env.GROQ_API_KEY;globalThis.fetch=async()=>{calls++;throw Error("must not call");};
+  try{assert.deepEqual(await savedConnectionStatus().json(),{configured:false});const response=await analyzeRequest(reviewRequest({key:undefined}));assert.equal(response.status,400);assert.equal((await endpointResult(response)).code,"GROQ_NOT_CONFIGURED");assert.equal(calls,0);}
+  finally{globalThis.fetch=originalFetch;if(previous!==undefined)process.env.GROQ_API_KEY=previous;}
 });
