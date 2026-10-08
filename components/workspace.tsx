@@ -34,7 +34,7 @@ export default function Workspace() {
   }
   async function verifyKey(){
     setBusy("Checking AI connection");setConnectionError("");
-    try {const res=await fetch("/api/ai-status",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key})});const data=await res.json() as {error?:string;connected?:boolean};if(!res.ok||!data.connected)throw new Error(data.error||"The AI connection could not be verified.");setKeyVerified(true);setSettings(false);toast.success("Groq key verified. AI analysis is ready.");}
+    try {const res=await fetch("/api/ai-status",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key})});const data=await res.json() as {error?:string;connected?:boolean};if(!res.ok||!data.connected)throw new Error(data.error||"The AI connection could not be verified.");setKeyVerified(true);setSettings(false);setAnalysisError("");toast.success("AI generation tested. Your connection is ready.");}
     catch(e){setKeyVerified(false);setConnectionError(errorText(e));}finally{setBusy("");}
   }
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]), [analysisMode, setAnalysisMode] = useState<"local" | "groq" | null>(null);
@@ -114,11 +114,11 @@ export default function Workspace() {
       if(companyURL&&!company)company=await loadCompany(companyURL);
       setAnalysisError("");setBusy("Reviewing your CV");
       const res=await fetch("/api/analyze",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({blocks,job,evidence,key,research:company?.sources||[],history:suggestions.map(({blockId,original,suggested,status})=>({blockId,original,suggested,status}))})});
-      const data=await res.json() as Analysis&{error?:string};if(!res.ok)throw new Error(data.error||"AI analysis failed.");
+      const data=await res.json() as Analysis&{error?:string;code?:string};if(!res.ok){if(data.code==="GROQ_AUTH"||data.code==="GROQ_MODEL_ACCESS"){setKeyVerified(false);setConnectionError(data.error||"Reconnect AI.");}throw new Error(data.error||"AI analysis failed.");}
       if(!suggestions.length)setOriginal(blocks);
       setSuggestions(prev=>[...prev,...data.suggestions.map(s=>({...s,id:crypto.randomUUID()}))]);setComments(data.comments||[]);setInsights(data.insights||[]);setAnalysisMode("groq");setTab("review");setFilter("pending");
       toast.success(`${data.suggestions.length} suggestions · ${data.comments?.length||0} review comments.`);
-    }catch(e){const message=errorText(e);toast.error(message);setAnalysisError(message);setComments(localAnalysis(blocks,job,evidence).comments||[]);setAnalysisMode(suggestions.length?"groq":"local");setTab("review");}finally{setBusy("");}
+    }catch(e){const message=errorText(e);toast.error(message);setAnalysisError(message);}finally{setBusy("");}
   }
   async function revise(id: string, comment: string) {
     if(!key||!keyVerified) {toast.info("Add a Groq key in AI settings for comment-based revisions. You can also edit the proposed wording yourself."); return;}
@@ -157,6 +157,7 @@ export default function Workspace() {
     </header>
     <main className="workspace">
       <div className="page-heading"><div><h1>CV editor</h1></div><button className="button secondary" onClick={loadSample} disabled={!!busy || !!blocks.length}><BookOpen size={17}/> Try a sample</button></div>
+      {analysisError&&<div className="connection-error" role="alert"><p>AI review failed: {analysisError}</p><button className="button secondary small" disabled={!!busy} onClick={analyze}>{keyVerified?"Retry AI review":"Reconnect AI"}</button></div>}
       <Tabs value={tab} onValueChange={setTab} className="workspace-tabs">
         <div className="workflow-bar"><TabsList className="steps" variant="line"><TabsTrigger value="sources"><span className="step-number">1</span> Add your sources</TabsTrigger><TabsTrigger value="review" disabled={!analysisMode}><span className="step-number">2</span> Review changes{pending>0&&<span className="count">{pending}</span>}</TabsTrigger><TabsTrigger value="export" disabled={!blocks.length}><span className="step-number">3</span> Export CV</TabsTrigger></TabsList><span className="mode-label">{keyVerified ? "AI ready · Groq" : "AI not connected"}</span></div>
         <TabsContent value="sources">
@@ -193,7 +194,6 @@ export default function Workspace() {
         </TabsContent>
         <TabsContent value="review">
           <div className="review-summary"><div><h2>Suggestions and comments</h2><p>{analysisMode==="local"?"Non-AI checks and questions. Connect Groq for an AI review.":"Review of this job and your sources. Accept, reject, or revise suggestions; comments explain what needs clarification."}</p></div><span className="review-count"><strong>{accepted}</strong> / {suggestions.length} accepted</span></div>
-          {analysisError&&<p className="connection-error" role="alert">AI review could not complete: {analysisError} The comments below come from non-AI checks.</p>}
           <div className="review-grid">
             <section className="document-panel"><div className="document-toolbar"><span><FileText size={16}/> Your current CV</span><span>{accepted ? `${accepted} approved changes` : "Original text"}</span></div><CVDocument blocks={blocks} suggestions={suggestions} style={cvStyle}/><p className="paper-caption">Imported style · only approved edits</p></section>
             <section className="suggestions-panel">
@@ -222,7 +222,7 @@ export default function Workspace() {
       <footer className="footer"><span>CV Agent</span><p>Job alignment and formatting guidance. No universal ATS score or guaranteed outcome.</p><a href="https://github.com/lamanmamed/cv-agent" target="_blank" rel="noreferrer">Source code <Github size={14}/></a></footer>
     </main>
     <div className="print-only"><CVDocument blocks={blocks} suggestions={[]} style={cvStyle}/></div>
-    <Dialog open={settings} onOpenChange={setSettings}><DialogContent className="settings-dialog"><DialogTitle>Connect AI</DialogTitle><DialogDescription>AI tailoring uses Groq. Create a free-plan account, generate an API key, and connect it here.</DialogDescription><label className="field"><span>Groq API key</span><input type="password" autoComplete="off" disabled={!!busy} value={key} onChange={e=>{setKey(e.target.value.trim());setKeyVerified(false);setConnectionError("");}} placeholder="gsk_…"/></label><p className="small-note">Testing the key checks model access without generating text. During AI analysis, CV and project text is sent to Groq. The key stays in this tab’s memory.</p><p className="small-note">Job and company URLs are read through Jina Reader. CV files are not sent to that reader. Keep your Groq account on the free plan if you want to avoid paid inference.</p>{connectionError&&<p role="alert" className="connection-error">{connectionError}</p>}<a href="https://console.groq.com/keys" target="_blank" rel="noreferrer" className="text-button">Create a Groq key</a><div className="dialog-actions"><button className="button secondary" disabled={!!busy} onClick={()=>{setKey("");setKeyVerified(false);setSettings(false);}}>Disconnect</button><button className="button primary" disabled={!!busy||key.length<10} onClick={verifyKey}>{busy?"Testing…":"Test and connect"}</button></div></DialogContent></Dialog>
+    <Dialog open={settings} onOpenChange={setSettings}><DialogContent className="settings-dialog"><DialogTitle>Connect AI</DialogTitle><DialogDescription>AI tailoring uses Groq. Create a free-plan account, generate an API key, and connect it here.</DialogDescription><label className="field"><span>Groq API key</span><input type="password" autoComplete="off" disabled={!!busy} value={key} onChange={e=>{setKey(e.target.value.trim());setKeyVerified(false);setConnectionError("");}} placeholder="gsk_…"/></label><p className="small-note">Testing runs a small AI generation request using fictional data and the review format; it uses your Groq quota. During AI analysis, CV and project text is sent to Groq. The key stays in this tab’s memory.</p><p className="small-note">Job and company URLs are read through Jina Reader. CV files are not sent to that reader. Keep your Groq account on the free plan if you want to avoid paid inference.</p>{connectionError&&<p role="alert" className="connection-error">{connectionError}</p>}<a href="https://console.groq.com/keys" target="_blank" rel="noreferrer" className="text-button">Create a Groq key</a><div className="dialog-actions"><button className="button secondary" disabled={!!busy} onClick={()=>{setKey("");setKeyVerified(false);setSettings(false);}}>Disconnect</button><button className="button primary" disabled={!!busy||key.length<10} onClick={verifyKey}>{busy?"Testing…":"Test and connect"}</button></div></DialogContent></Dialog>
   </>;
 }
 

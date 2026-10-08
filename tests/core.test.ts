@@ -11,6 +11,8 @@ import {exportPDF} from "../lib/export.ts";
 import {readFile} from "node:fs/promises";
 import {PDFDocument} from "pdf-lib";
 import {POST as analyzeRequest} from "../app/api/analyze/route.ts";
+import {POST as connectionRequest} from "../app/api/ai-status/route.ts";
+import {outputJSON} from "../lib/ai-review-schema.ts";
 function reviewFixture():Suggestion[]{
   const block=parseCV(SAMPLE_CV).find(b=>b.text.includes("Responsible for analyzing"))!;
   return [{id:"test-edit",blockId:block.id,original:block.text,suggested:"• Analyzed customer data using Python and SQL.",reason:"Clarifies the documented analysis contribution.",status:"pending",citations:[{sourceId:block.id,quote:block.text}]}];
@@ -95,7 +97,7 @@ test("AI endpoint calls Groq, validates grounding, and suppresses reviewed edits
   globalThis.fetch=async(input,options)=>{
     calls++;assert.equal(String(input),"https://api.groq.com/openai/v1/chat/completions");
     const body=JSON.parse(String(options?.body));assert.equal(body.model,"openai/gpt-oss-20b");assert.equal(body.response_format.type,"json_schema");
-    return Response.json({choices:[{message:{content:JSON.stringify({suggestions:[edit],insights:[]})}}]});
+    return Response.json({choices:[{message:{content:JSON.stringify({suggestions:[edit],comments:[{blockId:edit.blockId,kind:"question",text:"What outcome can you substantiate for this Python and SQL analysis?"}],insights:[]})}}]});
   };
   const send=(extra:object={})=>analyzeRequest(new Request("https://cv.example/api/analyze",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({blocks,job:SAMPLE_JOB,evidence:[],key:"test-key-no-real-secret",...extra})}));
   try {
@@ -116,11 +118,11 @@ test("public reader uses Workers-compatible manual redirects",async()=>{
   const originalFetch=globalThis.fetch;globalThis.fetch=async(input,options)=>{assert.equal(options?.redirect,"manual");return new Response("Public source text.");};
   try{assert.equal(await boundedFetchText("https://r.jina.ai/https://company.com"),"Public source text.");globalThis.fetch=async()=>new Response(null,{status:302,headers:{location:"https://private.internal"}});await assert.rejects(()=>boundedFetchText("https://r.jina.ai/https://company.com"),/redirected/);}finally{globalThis.fetch=originalFetch;}
 });
-test("empty AI edits still yield comments, and one invalid edit does not discard a valid edit",async()=>{
+test("empty AI reviews fail explicitly, and one invalid edit does not discard a valid edit",async()=>{
   const originalFetch=globalThis.fetch,blocks=parseCV(SAMPLE_CV),valid={...reviewFixture()[0],jobRequirement:"Requirements: Python, SQL, PyTorch, statistics, and data visualization."};let output:object={suggestions:[],comments:[],insights:[]};
   globalThis.fetch=async()=>Response.json({choices:[{message:{content:JSON.stringify(output)}}]});
   const send=()=>analyzeRequest(new Request("https://cv.example/api/analyze",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({blocks,job:SAMPLE_JOB,evidence:[],key:"test-key-no-real-secret"})}));
-  try{let response=await send();let data=await response.json() as {suggestions:unknown[];comments:unknown[]};assert.equal(response.status,200);assert.equal(data.suggestions.length,0);assert.ok(data.comments.length>0);
+  try{let response=await send();let data=await response.json() as {suggestions:unknown[];comments:unknown[];code?:string};assert.equal(response.status,502);assert.equal(data.code,"GROQ_EMPTY_REVIEW");assert.equal(data.comments,undefined);
     output={suggestions:[{...valid,jobRequirement:"Made up requirement outside the job"},valid],comments:[],insights:[]};response=await send();data=await response.json() as typeof data;assert.equal(response.status,200);assert.equal(data.suggestions.length,1);assert.ok(data.comments.length>0);
     output={suggestions:[{...valid,jobRequirement:valid.jobRequirement.replace(/ /g,"  ")}],comments:[],insights:[]};response=await send();data=await response.json() as typeof data;assert.equal(data.suggestions.length,1);
   }finally{globalThis.fetch=originalFetch;}
@@ -136,4 +138,95 @@ test("PDF download embeds supported Unicode and omits app branding and timestamp
   const style=defaultCVStyle(),blocks=parseCV("Əli Məmmədova\nBakı | example@example.com\nEXPERIENCE\n• Explained results using Python and SQL.");
   const bytes=await exportPDF(blocks,style,async path=>new Uint8Array(await readFile(new URL("../public"+path,import.meta.url))));
   const document=await PDFDocument.load(bytes,{updateMetadata:false});assert.equal(document.getPageCount(),1);assert.equal(document.getTitle(),"Əli Məmmədova");assert.equal(document.getCreator(),"");assert.equal(document.getProducer(),"");assert.equal(document.getCreationDate(),undefined);
+});
+
+const endpointResult=async(response:Response)=>await response.json() as {connected?:boolean;code?:string;retryAfter?:number;mode?:string;suggestions?:Suggestion[];comments?:{text:string;origin:string}[]};
+const testKey="test-key-no-real-secret";
+const aiComment={blockId:"",kind:"question",text:"Which outcome can you document for the customer retention dashboard?"};
+const reviewRequest=(extra:object={})=>new Request("https://cv.example/api/analyze",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({blocks:parseCV(SAMPLE_CV),job:SAMPLE_JOB,evidence:[],key:testKey,...extra})});
+const connectRequest=()=>new Request("https://cv.example/api/ai-status",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({key:testKey})});
+const completion=(output:unknown,finish_reason="stop")=>Response.json({choices:[{finish_reason,message:{content:JSON.stringify(output)}}]});
+
+test("connection verification generates with the exact review model and schema using only synthetic data",async()=>{
+  const originalFetch=globalThis.fetch;let calls=0;
+  globalThis.fetch=async(input,options)=>{
+    calls++;assert.equal(String(input),"https://api.groq.com/openai/v1/chat/completions");
+    const body=JSON.parse(String(options?.body));assert.equal(body.model,"openai/gpt-oss-20b");
+    assert.equal(body.reasoning_effort,"low");assert.equal(body.response_format.json_schema.strict,true);assert.deepEqual(body.response_format.json_schema.schema,outputJSON);
+    const expected=JSON.parse(body.messages[1].content);assert.equal(expected.comments[0].text,"AI connection test completed.");assert.ok(!JSON.stringify(body).includes("Avery"));
+    return completion(expected);
+  };
+  try{const response=await connectionRequest(connectRequest());assert.equal(response.status,200);assert.equal((await endpointResult(response)).connected,true);assert.equal(calls,1);}
+  finally{globalThis.fetch=originalFetch;}
+});
+
+test("connection is not ready when generation is empty, truncated, or has the wrong shape",async()=>{
+  const originalFetch=globalThis.fetch;
+  try{for(const output of [()=>Response.json({data:[{id:"openai/gpt-oss-20b"}]}),()=>completion({suggestions:[],comments:[],insights:[]}),()=>completion({},"length")]){
+    globalThis.fetch=async()=>output();const response=await connectionRequest(connectRequest());const data=await endpointResult(response);assert.equal(response.status,502);assert.equal(data.connected,undefined);assert.ok(data.code);
+  }}finally{globalThis.fetch=originalFetch;}
+});
+
+test("provider failures have safe specific diagnostics in both endpoints and are never auto-retried",async()=>{
+  const originalFetch=globalThis.fetch;
+  const cases=[
+    {status:401,code:"GROQ_AUTH",message:"Invalid API Key",expected:401},
+    {status:403,code:"GROQ_MODEL_ACCESS",message:"Model permission denied",expected:403},
+    {status:413,code:"GROQ_INPUT_LIMIT",message:"Request too large",expected:413},
+    {status:429,code:"GROQ_RATE_LIMIT",message:"Rate limit reached for tokens per minute",expected:429},
+    {status:429,code:"GROQ_QUOTA",message:"Tokens per day quota reached",expected:429},
+    {status:400,code:"GROQ_REQUEST_REJECTED",message:"response_format JSON schema rejected",expected:502},
+    {status:503,code:"GROQ_UNAVAILABLE",message:"Service unavailable",expected:503},
+  ];
+  try{for(const fixture of cases){let calls=0;globalThis.fetch=async()=>{calls++;return Response.json({error:{message:`${fixture.message} ${testKey} PRIVATE_CV_TEXT`}},{status:fixture.status,headers:{"retry-after":"12"}});};
+    for(const response of [await analyzeRequest(reviewRequest()),await connectionRequest(connectRequest())]){
+      const data=await endpointResult(response);assert.equal(response.status,fixture.expected);assert.equal(data.code,fixture.code);assert.equal(data.mode,undefined);assert.equal(data.comments,undefined);
+      assert.ok(!JSON.stringify(data).includes(testKey));assert.ok(!JSON.stringify(data).includes("PRIVATE_CV_TEXT"));if(fixture.status===429)assert.equal(data.retryAfter,12);
+    }assert.equal(calls,2);
+  }}finally{globalThis.fetch=originalFetch;}
+});
+
+test("timeouts and network failures do not become input errors or non-AI reviews",async()=>{
+  const originalFetch=globalThis.fetch;
+  try{for(const [error,code,status] of [[new DOMException("timeout","TimeoutError"),"GROQ_TIMEOUT",504],[new TypeError("fetch failed"),"GROQ_NETWORK",503]] as const){
+    let calls=0;globalThis.fetch=async()=>{calls++;throw error;};const response=await analyzeRequest(reviewRequest());const data=await endpointResult(response);assert.equal(response.status,status);assert.equal(data.code,code);assert.equal(data.comments,undefined);assert.equal(calls,1);
+  }}finally{globalThis.fetch=originalFetch;}
+});
+
+test("an empty review is repaired by AI and a comments-only response is genuinely AI-generated",async()=>{
+  const originalFetch=globalThis.fetch;let calls=0;
+  globalThis.fetch=async(_input,options)=>{calls++;const body=JSON.parse(String(options?.body));if(calls===2)assert.match(body.messages[0].content,/Repair instructions/);return completion({suggestions:[],comments:calls===1?[]:[aiComment],insights:[]});};
+  try{const response=await analyzeRequest(reviewRequest());const data=await endpointResult(response);assert.equal(response.status,200);assert.equal(data.mode,"groq");assert.deepEqual(data.suggestions,[]);assert.equal(data.comments?.[0]?.text,aiComment.text);assert.equal(data.comments?.[0]?.origin,"ai");assert.equal(calls,2);}
+  finally{globalThis.fetch=originalFetch;}
+});
+
+test("all blocked edits get one grounding repair while unsupported facts remain blocked",async()=>{
+  const originalFetch=globalThis.fetch,valid={...reviewFixture()[0],jobRequirement:""};let calls=0;
+  globalThis.fetch=async(_input,options)=>{calls++;const body=JSON.parse(String(options?.body));if(calls===2)assert.match(body.messages[0].content,/unsupported number/);return completion({suggestions:[calls===1?{...valid,suggested:valid.suggested+" Increased revenue by 47%."}:valid],comments:[],insights:[]});};
+  try{const response=await analyzeRequest(reviewRequest());const data=await endpointResult(response);assert.equal(response.status,200);assert.equal(data.suggestions?.length,1);assert.equal(data.suggestions?.[0]?.suggested,valid.suggested);assert.equal(calls,2);}
+  finally{globalThis.fetch=originalFetch;}
+});
+
+test("a repair cannot convert unsupported claims into accepted edits",async()=>{
+  const originalFetch=globalThis.fetch;let calls=0;
+  globalThis.fetch=async()=>{calls++;return completion({suggestions:[{...reviewFixture()[0],jobRequirement:"",suggested:"Delivered a 47% increase in revenue."}],comments:[],insights:[]});};
+  try{const response=await analyzeRequest(reviewRequest());const data=await endpointResult(response);assert.equal(response.status,502);assert.equal(data.code,"GROQ_UNVERIFIED_REVIEW");assert.equal(data.suggestions,undefined);assert.equal(data.comments,undefined);assert.equal(calls,2);}
+  finally{globalThis.fetch=originalFetch;}
+});
+
+test("truncated and malformed completions get at most one bounded repair",async()=>{
+  const originalFetch=globalThis.fetch;
+  try{for(const first of [()=>completion({},"length"),()=>Response.json({choices:[{message:{content:"{invalid"}}]})]){
+    let calls=0,initialBudget=0;globalThis.fetch=async(_input,options)=>{calls++;const body=JSON.parse(String(options?.body));if(calls===1)initialBudget=body.max_completion_tokens;else{assert.ok(body.max_completion_tokens>initialBudget);assert.match(body.messages[0].content,/at most 2 short edits/);}return calls===1?first():completion({suggestions:[],comments:[aiComment],insights:[]});};
+    const response=await analyzeRequest(reviewRequest());assert.equal(response.status,200);assert.equal((await endpointResult(response)).comments?.[0]?.origin,"ai");assert.equal(calls,2);
+  }
+    let calls=0;globalThis.fetch=async()=>{calls++;return completion({},"length");};const response=await analyzeRequest(reviewRequest());assert.equal(response.status,502);assert.equal((await endpointResult(response)).code,"GROQ_OUTPUT_TRUNCATED");assert.equal(calls,2);
+  }finally{globalThis.fetch=originalFetch;}
+});
+
+test("a revision repairs only its pending block and never changes the original CV",async()=>{
+  const originalFetch=globalThis.fetch,blocks=parseCV(SAMPLE_CV),suggestion={...reviewFixture()[0],jobRequirement:""};const before=structuredClone(blocks);let calls=0;
+  globalThis.fetch=async()=>{calls++;return completion({suggestions:[{...suggestion,blockId:calls===1?"wrong-block":suggestion.blockId}],comments:[],insights:[]});};
+  try{const response=await analyzeRequest(reviewRequest({blocks,revision:{suggestion,comment:"Make the contribution clearer."}}));const data=await endpointResult(response);assert.equal(response.status,200);assert.equal(data.suggestions?.length,1);assert.equal(data.suggestions?.[0]?.blockId,suggestion.blockId);assert.equal(data.suggestions?.[0]?.status,"pending");assert.deepEqual(blocks,before);assert.equal(calls,2);}
+  finally{globalThis.fetch=originalFetch;}
 });
