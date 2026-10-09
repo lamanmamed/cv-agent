@@ -4,7 +4,7 @@ An AI CV editor that tailors resumes to job descriptions using evidence from you
 
 ## What works now
 
-- Import a text-based PDF, DOCX, TXT, or Markdown CV, or paste CV text. PDF imports detect font family, sizes, weight, alignment, colors, and heading rules for the preview.
+- Import a text-based PDF, DOCX, TXT, or Markdown CV, or paste CV text. Uploaded PDFs are previewed directly from the original file in the browser, without recreating their styling. DOCX files retain their actual OOXML package; the app presents a clearly marked text-only wording view and a download of the original file rather than a misleading imitation of Word layout.
 - Import a public HTTPS job URL from any website, or paste its description. Known Greenhouse, Lever, and Ashby links use their public APIs; other pages use Jina Reader. Login walls and blocked pages require pasted text.
 - Research the company homepage and up to seven relevant linked pages, inspect the sources, and get cited company insights with AI analysis.
 - Import public GitHub READMEs (one repository, or up to three recently updated non-fork repositories from a profile).
@@ -12,9 +12,9 @@ An AI CV editor that tailors resumes to job descriptions using evidence from you
 - Run non-AI review checks and concrete evidence questions without an API key. These comments are clearly labeled and do not rewrite the CV.
 - Verify your own Groq API key, then generate role-specific AI suggestions with exact job requirements, source excerpts, and selective comment-based revisions.
 - Accept or reject individual edits, edit proposed wording, inspect source excerpts, and undo decisions.
-- Export the approved CV as DOCX, plain text, or a direct PDF download without browser headers or footers. Download the original text and review history as JSON.
+- Export approved wording in the original DOCX package, or download an unchanged uploaded PDF in its original layout. Text-only CVs can be exported as newly laid-out DOCX/PDF files. Download the reviewed text or review history as JSON.
 
-An unchanged PDF is returned in its original layout. Edited PDFs adapt to the detected typography, density, alignment, colors, and heading treatment. Complex columns, tables, and graphical layouts can reflow and are not reproduced exactly. Edited DOCX uploads retain the original OOXML package, paragraph properties, and styles of unchanged text runs. Text-only CVs use a compact neutral layout. There is no universal ATS pass score; the keyword panel is a limited technical-term scan, not a prediction of hiring outcomes.
+An uploaded PDF is displayed directly as its original file; no reconstruction is performed in the review. PDF text changes cannot reliably be applied in-place without affecting complex layouts, and the app now blocks a style-changing edited-PDF export. To apply edits while retaining typography and layout, provide the source DOCX. DOCX exports patch the original OOXML package and retain its layout/style structure, though replacement text may naturally reflow lines or pages. To obtain a PDF from an edited Word file, open the downloaded DOCX in Word or Google Docs and export it from there. The browser does not reproduce Word's full page layout, so DOCX review text is explicitly labeled text-only. Text-only CVs use a compact neutral layout. There is no universal ATS pass score; the keyword panel is a limited technical-term scan, not a prediction of hiring outcomes.
 
 ## Run locally
 
@@ -60,7 +60,7 @@ Accepted edits replace only their target line. Undo restores that line. Stale pr
 - Job imports accept general public HTTPS websites. Private/local addresses, embedded credentials, and custom ports are rejected. General URLs are read through Jina Reader rather than fetched directly from the application network. Reader availability and rate limits may affect imports. Company research covers linked official pages, not an exhaustive search of the entire web.
 - GitHub imports support public READMEs only, not private repositories or full-code retrieval. Public API rate limits may apply.
 - Scanned-image PDFs need pasted text; OCR is not implemented. Complex multi-column PDFs may extract out of order. Check and edit extracted text before analysis.
-- PDF output downloads directly; no app title, page URL, timestamp, or review annotations are added to the page. Embedded serif, sans, and mono fonts support Latin, Greek, and Cyrillic text. Unavailable glyphs produce an explicit export error instead of silently dropping characters. Review pagination before sending.
+- Unchanged source PDFs download verbatim with no app title, page URL, timestamp, or review annotations. DOCX uploads export through OOXML text patches rather than PDF re-layout. For text-only CV input, new PDFs use embedded serif, sans and mono fonts covering Latin, Greek and Cyrillic; unavailable glyphs generate an explicit error. Review pagination before sending.
 - There are no accounts, durable CV storage, or cross-device history in this version.
 - The private hosted preview is owner-only. A future public deployment needs stronger abuse controls before adding any shared provider credential; this version uses each user's own key.
 
@@ -68,7 +68,7 @@ Accepted edits replace only their target line. Undo restores that line. Stale pr
 
 | Layer | Files |
 | --- | --- |
-| Upload, preview, review, export | `components/workspace.tsx` |
+| Upload, original PDF preview, Word source handling, review, export | `components/workspace.tsx` |
 | CV blocks, keywords, edit validation, review history, decisions | `lib/cv.ts` |
 | PDF/DOCX/ZIP extraction, positioned PDF text, token redaction | `lib/import.ts`, `lib/pdf-text.ts` |
 | Imported style inference and direct PDF / DOCX exports | `lib/cv-style.ts`, `lib/export.ts` |
