@@ -11,10 +11,10 @@ An AI CV editor that tailors resumes to job descriptions using evidence from you
 - Add project ZIPs, READMEs, and supporting documents. Read selected text files without executing uploaded code.
 - Run non-AI review checks and concrete evidence questions without an API key. These comments are clearly labeled and do not rewrite the CV.
 - Verify your own Groq API key, then generate role-specific AI suggestions with exact job requirements, source excerpts, and selective comment-based revisions.
-- Accept or reject individual edits, edit proposed wording, inspect source excerpts, and undo decisions.
+- Review AI edits in a document-centered workspace: highlights anchored to the uploaded PDF’s extracted text rows, or contextual wording annotations in a DOCX text view. Navigate Previous/Next, compare Original/Suggested, accept/reject/undo, manually modify text, or ask Groq for one revised proposal.
 - Export approved wording in the original DOCX package, or download an unchanged uploaded PDF in its original layout. Text-only CVs can be exported as newly laid-out DOCX/PDF files. Download the reviewed text or review history as JSON.
 
-An uploaded PDF is displayed directly as its original file; no reconstruction is performed in the review. PDF text changes cannot reliably be applied in-place without affecting complex layouts, and the app now blocks a style-changing edited-PDF export. To apply edits while retaining typography and layout, provide the source DOCX. DOCX exports patch the original OOXML package and retain its layout/style structure, though replacement text may naturally reflow lines or pages. To obtain a PDF from an edited Word file, open the downloaded DOCX in Word or Google Docs and export it from there. The browser does not reproduce Word's full page layout, so DOCX review text is explicitly labeled text-only. Text-only CVs use a compact neutral layout. There is no universal ATS pass score; the keyword panel is a limited technical-term scan, not a prediction of hiring outcomes.
+An uploaded PDF is rendered with PDF.js from its original bytes, with anchored non-destructive edit highlights and floating proposed-wording annotations; no reconstruction of the source document is performed. The annotation is a review preview, not an in-place text edit or accurate preview of pagination after editing. PDF text changes cannot reliably be applied in-place without affecting complex layouts, and the app now blocks a style-changing edited-PDF export. To apply edits while retaining typography and layout, provide the source DOCX. DOCX exports patch the original OOXML package and retain its layout/style structure, though replacement text may naturally reflow lines or pages. To obtain a PDF from an edited Word file, open the downloaded DOCX in Word or Google Docs and export it from there. The browser does not reproduce Word's full page layout, so DOCX review text is explicitly labeled text-only. Review suggestions appear beside the extracted document text, while the original DOCX stays the export master. Text-only CVs use a compact neutral layout. There is no universal ATS pass score; the keyword panel is a limited technical-term scan, not a prediction of hiring outcomes.
 
 ## Run locally
 
@@ -68,7 +68,7 @@ Accepted edits replace only their target line. Undo restores that line. Stale pr
 
 | Layer | Files |
 | --- | --- |
-| Upload, original PDF preview, Word source handling, review, export | `components/workspace.tsx` |
+| Upload, source handling, review state, export | `components/workspace.tsx` |\n| Original PDF canvas, anchored suggestion overlays, single-suggestion editor, Word text review | `components/inline-cv-review.tsx`, `lib/pdf-anchors.ts` |
 | CV blocks, keywords, edit validation, review history, decisions | `lib/cv.ts` |
 | PDF/DOCX/ZIP extraction, positioned PDF text, token redaction | `lib/import.ts`, `lib/pdf-text.ts` |
 | Imported style inference and direct PDF / DOCX exports | `lib/cv-style.ts`, `lib/export.ts` |

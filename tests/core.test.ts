@@ -2,6 +2,7 @@ import {test} from "node:test";
 import assert from "node:assert/strict";
 import {applyDecision,parseCV,localAnalysis,validateSuggestions,keywordReport,isMeaningfulEdit,filterReviewedEdits,SAMPLE_CV,SAMPLE_JOB,SAMPLE_EVIDENCE,type Suggestion,descriptionError,isURLOnly} from "../lib/cv.ts";
 import {pdfItemsToText} from "../lib/pdf-text.ts";
+import {findPDFAnchors} from "../lib/pdf-anchors.ts";
 import {publicWebURL,researchCompany,readPublicPage} from "../lib/web-research.ts";
 import {readEvidence,redactSecrets} from "../lib/import.ts";
 import {readJSON,boundedFetchText} from "../lib/api.ts";
@@ -292,4 +293,27 @@ test("formatted CVs never silently use a rebuilt export layout",()=>{
   assert.ok(sameDocumentContent(original,[{...original[0]}]));
   assert.ok(!sameDocumentContent(original,[{id:"one",text:"Edited sentence"}]));
   assert.ok(!sameDocumentContent(original,[{id:"two",text:"Original sentence"}]));
+});
+
+test("inline suggestion anchors find original PDF rows without modifying content",()=>{
+  const blocks=[
+    {id:"line-0",text:"• Built a model using Python and SQL.",heading:false,section:"Experience"},
+    {id:"line-1",text:"Measured improvements in customer retention.",heading:false,section:"Experience"},
+  ];
+  const rows=[
+    [{text:"PROFILE"},{text:"Built a model using Python and SQL."}],
+    [{text:"Measured improvements in customer"},{text:"retention."}],
+  ];
+  const matched=findPDFAnchors(blocks,rows);
+  assert.deepEqual(matched["line-0"],{page:0,firstRow:1,lastRow:1});
+  assert.deepEqual(matched["line-1"],{page:1,firstRow:0,lastRow:1});
+  assert.equal(findPDFAnchors([{id:"different",text:"An unsupported invented line"}],rows).different,undefined);
+  assert.equal(rows[0][1].text,"Built a model using Python and SQL.");
+});
+
+test("duplicate PDF wording anchors to distinct original rows",()=>{
+  const blocks=[{id:"one",text:"Python machine learning project description"},{id:"two",text:"Python machine learning project description"}];
+  const anchors=findPDFAnchors(blocks,[[{text:blocks[0].text},{text:blocks[1].text}]]);
+  assert.deepEqual(anchors.one,{page:0,firstRow:0,lastRow:0});
+  assert.deepEqual(anchors.two,{page:0,firstRow:1,lastRow:1});
 });

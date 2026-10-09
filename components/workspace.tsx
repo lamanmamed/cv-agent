@@ -10,6 +10,7 @@ import { readCVDocument, readEvidence, saveBlob } from "@/lib/import";
 
 import {defaultCVStyle,blockStyle,cssFont,type CVStyle} from "@/lib/cv-style";
 import {sameDocumentContent,layoutSafeExports} from "@/lib/document-preservation";
+import InlineCVReview from "@/components/inline-cv-review";
 
 const errorText = (e: unknown) => e instanceof Error ? e.message : "Something went wrong. Please try again.";
 type UploadedCV = {bytes:ArrayBuffer;format:string;blocks:Block[]};
@@ -226,23 +227,18 @@ export default function Workspace() {
           <div className="analyze-bar"><div><p><strong>{keyVerified?"AI analysis":"AI connection required"}</strong><span>{keyVerified?"Uses the job, project evidence, and available company sources.":"Connect a free-plan Groq key to generate tailored edits."}</span></p></div><div className="analyze-options"><button className="text-button" disabled={!!busy||!blocks.length||job.trim().length<40} onClick={runChecks}>Review checks</button><button className="button primary analyze-button" onClick={analyze} disabled={!!busy||(keyVerified&&(!blocks.length||job.trim().length<40))}>{busy?<LoaderCircle className="spin" size={19}/>:<Sparkles size={19}/>} {busy||(keyVerified?"Review CV":"Connect AI")}</button></div></div>
         </TabsContent>
         <TabsContent value="review">
-          <div className="review-summary"><div><h2>Suggestions and comments</h2><p>{analysisMode==="local"?"Non-AI checks and questions. Connect Groq for an AI review.":"Review of this job and your sources. Accept, reject, or revise suggestions; comments explain what needs clarification."}</p></div><span className="review-count"><strong>{accepted}</strong> / {suggestions.length} accepted</span></div>
-          <div className="review-grid">
-            <section className="document-panel"><div className="document-toolbar"><span><FileText size={16}/> {uploaded?"Your uploaded document":"Your CV draft"}</span><span>{uploaded?uploaded.format.toUpperCase():"Text draft"}</span></div><OriginalDocumentPreview source={uploaded} pdfURL={pdfPreviewURL} fileName={fileName} blocks={blocks} suggestions={suggestions} style={cvStyle}/><p className="paper-caption">{uploaded?.format==="pdf"?"Original PDF layout shown. Accepted text edits remain in the review, not the source PDF.":uploaded?.format==="docx"?"Original Word file retained. Its exact page layout is not rendered in the browser.":"Text-only draft · accepted wording shown"}</p></section>
-            <section className="suggestions-panel">
-              {insights.length>0&&research&&<section className="insights-panel"><h3>Company context</h3>{insights.map((insight,i)=><div key={i} className="company-insight"><p>{insight.point}</p><details><summary>Source</summary><blockquote>{insight.quote}</blockquote><a href={research.sources.find(r=>r.id===insight.sourceId)?.url} target="_blank" rel="noreferrer">{research.sources.find(r=>r.id===insight.sourceId)?.title}</a></details></div>)}</section>}
-              {comments.length>0&&<section className="review-comments"><h3>Review comments</h3>{comments.map(c=><article className="review-comment" key={c.id}><div><MessageSquare size={16}/><strong>{c.kind==="question"?"Clarify":c.kind==="strength"?"What works":"Observation"}</strong><span>{c.origin==="ai"?"AI review":"Review check"}</span></div>{c.blockId&&<blockquote>{blocks.find(b=>b.id===c.blockId)?.text}</blockquote>}<p>{c.text}</p></article>)}</section>}
-              <div className="keyword-panel"><div className="keyword-title"><h3>Job keyword coverage</h3><span>{report.matched.length} / {report.requirements.length} found in CV</span></div>
-                <div className="keyword-tags">{report.matched.map(s=><span className="keyword matched" key={s}><Check size={12}/>{s}</span>)}{report.evidenceOnly.map(s=><span className="keyword evidence" key={s}>{s} · in evidence</span>)}{report.missing.map(s=><span className="keyword missing" key={s}>{s} · gap</span>)}</div>
-                <p>Technical term scan, not an ATS score. A mention in project evidence needs your confirmation before becoming a CV claim.</p>
-              </div>
-              {suggestions.length>0&&<Tabs value={filter} onValueChange={setFilter}><TabsList className="review-filters"><TabsTrigger value="pending">To review ({pending})</TabsTrigger><TabsTrigger value="all">All changes ({suggestions.length})</TabsTrigger></TabsList><TabsContent value={filter}>
-                <div className="suggestion-list">{suggestions.filter(s=>filter==="all"||s.status==="pending").map((s,i)=><SuggestionCard key={s.id} suggestion={s} index={i+1} section={original.find(b=>b.id===s.blockId)?.section||"CV"} sources={sources} disabled={!!busy} onDecision={status=>safeDecision(s.id,status)} onRevise={comment=>revise(s.id,comment)} onEdit={text=>setSuggestions(prev=>prev.map(item=>item.id===s.id?{...item,suggested:text,reason:"Wording edited by you. Confirm the claims before accepting."}:item))}/>)}</div>
-                {suggestions.length>0&&filter==="pending"&&pending===0&&<div className="empty-review"><h3>All suggestions reviewed</h3><p>Your decisions are saved for this session. Review comments remain available above.</p><button className="button secondary" onClick={()=>setTab("export")}>Continue to export</button></div>}
-
-              </TabsContent></Tabs>}
-            </section>
+          <div className="review-summary">
+            <div><h2>Review changes in your CV</h2><p>Select highlighted text to compare the original and suggested wording in context. Approve, reject, edit or ask Groq for another version; your source file is never silently restyled.</p></div>
+            <span className="review-count"><strong>{accepted}</strong> / {suggestions.length} accepted</span>
           </div>
+          <InlineCVReview source={uploaded} fileName={fileName} blocks={blocks} suggestions={suggestions} disabled={!!busy} onDecision={(id,status)=>safeDecision(id,status)} onRevise={(id,instruction)=>revise(id,instruction)} onEdit={(id,text)=>setSuggestions(prev=>prev.map(item=>item.id===id?{...item,suggested:text,reason:"Wording edited by you. Confirm the claims before accepting."}:item))}/>
+          {analysisError&&<p className="connection-error" role="alert">{analysisError}</p>}
+          {(comments.length>0||report.requirements.length>0)&&<details className="editor-additional-feedback">
+            <summary>Additional review context · {comments.length} observations · {report.matched.length}/{report.requirements.length} job terms mentioned</summary>
+            {comments.length>0&&<div className="review-comments">{comments.map(c=><article className="review-comment" key={c.id}><div><MessageSquare size={16}/><strong>{c.kind==="question"?"Clarification needed":c.kind==="strength"?"Strength":"Observation"}</strong><span>{c.origin==="ai"?"AI review":"Review check"}</span></div>{c.blockId&&<blockquote>{blocks.find(b=>b.id===c.blockId)?.text}</blockquote>}<p>{c.text}</p></article>)}</div>}
+            {report.requirements.length>0&&<div className="keyword-panel"><div className="keyword-title"><h3>Job keyword coverage</h3><span>{report.matched.length} / {report.requirements.length} found in CV</span></div><div className="keyword-tags">{report.matched.map(s=><span className="keyword matched" key={s}><Check size={12}/>{s}</span>)}{report.evidenceOnly.map(s=><span className="keyword evidence" key={s}>{s} · in evidence</span>)}{report.missing.map(s=><span className="keyword missing" key={s}>{s} · gap</span>)}</div><p>Technical term scan, not an ATS score. Evidence-only terms need your confirmation.</p></div>}
+          </details>}
+          {suggestions.length>0&&pending===0&&<div className="editor-done"><Check size={17}/> All decisions reviewed. <button className="text-button" onClick={()=>setTab("export")}>Continue to export <ChevronRight size={15}/></button></div>}
         </TabsContent>
         <TabsContent value="export">
           <div className="export-grid"><section><h2 className="export-heading">Export CV</h2><p className="export-copy">Download approved wording without silently replacing your uploaded document’s design. Suggestions and comments stay outside the document.</p><div className="export-status"><Check size={18}/>{accepted} changes accepted{pending>0&&<span> · {pending} still pending</span>}</div>
