@@ -9,6 +9,7 @@ import { applyDecision, cvSources, keywordReport, localAnalysis, parseCV, isEntr
 import { readCVDocument, readEvidence, saveBlob } from "@/lib/import";
 
 import {defaultCVStyle,blockStyle,cssFont,type CVStyle} from "@/lib/cv-style";
+import {sameDocumentContent,layoutSafeExports} from "@/lib/document-preservation";
 
 const errorText = (e: unknown) => e instanceof Error ? e.message : "Something went wrong. Please try again.";
 type UploadedCV = {bytes:ArrayBuffer;format:string;blocks:Block[]};
@@ -69,9 +70,8 @@ export default function Workspace() {
   const report = keywordReport(blocks, job, evidence), accepted = suggestions.filter(s => s.status === "accepted").length, pending = suggestions.filter(s => s.status === "pending").length;
   const sources = cvSources(original.length ? original : blocks, evidence);
   const uploaded=originalFile.current;
-  const uploadedUnchanged=!uploaded||JSON.stringify(uploaded.blocks)===JSON.stringify(blocks);
-  const allowStyledDOCX=!uploaded||uploaded.format==="docx";
-  const allowStyledPDF=!uploaded||(uploaded.format==="pdf"&&uploadedUnchanged);
+  const uploadedUnchanged=!uploaded||sameDocumentContent(uploaded.blocks,blocks);
+  const {docx:allowStyledDOCX,pdf:allowStyledPDF}=layoutSafeExports(uploaded?.format||null,uploadedUnchanged);
 
   function setCV(text: string, name = "Pasted CV") {
     setCVStyle(defaultCVStyle());originalFile.current=null;
@@ -174,8 +174,8 @@ export default function Workspace() {
     } catch(e) {toast.error(errorText(e));} finally {setBusy("");}
   }
   async function downloadPDF(){
-    if(originalFile.current&&(originalFile.current.format!=="pdf"||JSON.stringify(originalFile.current.blocks)!==JSON.stringify(blocks))){toast.error("Exact-layout PDF export is only available for an unchanged source PDF. For approved edits, export the source DOCX through Word.");return;}
-    setBusy("Preparing PDF");try{const file=originalFile.current,unchanged=file&&file.format==="pdf"&&JSON.stringify(file.blocks)===JSON.stringify(blocks);if(unchanged){saveBlob(new Blob([file.bytes],{type:"application/pdf"}),"tailored-cv.pdf");}else{const {exportPDF}=await import("@/lib/export");saveBlob(new Blob([new Uint8Array(await exportPDF(blocks,cvStyle)).buffer],{type:"application/pdf"}),"tailored-cv.pdf");}toast.success("PDF downloaded without browser headers or footers.");}catch(e){toast.error(errorText(e));}finally{setBusy("");}
+    if(originalFile.current&&(originalFile.current.format!=="pdf"||!sameDocumentContent(originalFile.current.blocks,blocks))){toast.error("Exact-layout PDF export is only available for an unchanged source PDF. For approved edits, export the source DOCX through Word.");return;}
+    setBusy("Preparing PDF");try{const file=originalFile.current,unchanged=file&&file.format==="pdf"&&sameDocumentContent(file.blocks,blocks);if(unchanged){saveBlob(new Blob([file.bytes],{type:"application/pdf"}),"tailored-cv.pdf");}else{const {exportPDF}=await import("@/lib/export");saveBlob(new Blob([new Uint8Array(await exportPDF(blocks,cvStyle)).buffer],{type:"application/pdf"}),"tailored-cv.pdf");}toast.success("PDF downloaded without browser headers or footers.");}catch(e){toast.error(errorText(e));}finally{setBusy("");}
   }
   function rejectDescription(){const message=descriptionError(job)||"You pasted the wrong thing: put the URL into Job link and press Read link.";setJobError(message);toast.error(message,{position:"top-right",id:"wrong-description"});}
   function validateInputs(){const error=descriptionError(job);if(error){setJobError(error);toast.error(error,{position:"top-right",id:"wrong-description"});return false;}if(!blocks.length){toast.error("Add your CV first.");return false;}return true;}
