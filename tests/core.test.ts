@@ -307,7 +307,7 @@ test("inline suggestion anchors find original PDF rows without modifying content
   const matched=findPDFAnchors(blocks,rows);
   assert.deepEqual(matched["line-0"],{page:0,firstRow:1,lastRow:1});
   assert.deepEqual(matched["line-1"],{page:1,firstRow:0,lastRow:1});
-  assert.equal(findPDFAnchors([{id:"different",text:"An unsupported invented line",heading:false,section:"CV"}],rows).different,undefined);
+  assert.equal(findPDFAnchors([{id:"different",text:"An unsupported invented line"}],rows).different,undefined);
   assert.equal(rows[0][1].text,"Built a model using Python and SQL.");
 });
 
