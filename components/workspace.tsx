@@ -270,9 +270,8 @@ function ChangeText({before,after,side}:{before:string;after:string;side:"before
   return <>{prefix}{prefix&&middle?" ":""}{middle&&(side==="before"?<del className="change-del">{middle}</del>:<ins className="change-ins">{middle}</ins>)}{suffix&&(prefix||middle)?" ":""}{suffix}</>;
 }
 function OriginalDocumentPreview({source,pdfURL,fileName,blocks,suggestions,style}:{source:UploadedCV|null;pdfURL:string|null;fileName:string;blocks:Block[];suggestions:Suggestion[];style:CVStyle}) {
-  if(source?.format==="pdf"&&pdfURL)return <div className="source-document">
-    <iframe className="source-pdf-frame" src={pdfURL} title="Original uploaded PDF CV" />
-    <a className="source-open-link" href={pdfURL} target="_blank" rel="noopener noreferrer">Open original PDF in a new tab</a>
+  if(source?.format==="pdf")return <div className="source-document">
+    {pdfURL?<><iframe className="source-pdf-frame" src={pdfURL} title="Original uploaded PDF CV" /><a className="source-open-link" href={pdfURL} target="_blank" rel="noopener noreferrer">Open original PDF in a new tab</a></>:<p className="source-layout-note">Loading the original PDF preview…</p>}
     {source.blocks.some((b,i)=>blocks[i]?.text!==b.text)&&<p className="source-layout-note">This is the original PDF, not a reformatted copy. Approved wording is tracked in the review and cannot be drawn back into the PDF without risking its original layout.</p>}
   </div>;
   if(source?.format==="docx")return <div className="source-word-preview">
