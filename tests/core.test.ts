@@ -8,6 +8,7 @@ import {readJSON,boundedFetchText} from "../lib/api.ts";
 import JSZip from "jszip";
 import {defaultCVStyle,inferPDFStyle} from "../lib/cv-style.ts";
 import {exportPDF} from "../lib/export.ts";
+import {layoutSafeExports,sameDocumentContent} from "../lib/document-preservation.ts";
 import {readFile} from "node:fs/promises";
 import {PDFDocument} from "pdf-lib";
 import {POST as analyzeRequest} from "../app/api/analyze/route.ts";
@@ -279,4 +280,16 @@ test("no saved key produces a clear unconfigured error without a provider call",
   const originalFetch=globalThis.fetch,previous=process.env.GROQ_API_KEY;let calls=0;delete process.env.GROQ_API_KEY;globalThis.fetch=async()=>{calls++;throw Error("must not call");};
   try{assert.deepEqual(await savedConnectionStatus().json(),{configured:false});const response=await analyzeRequest(reviewRequest({key:undefined}));assert.equal(response.status,400);assert.equal((await endpointResult(response)).code,"GROQ_NOT_CONFIGURED");assert.equal(calls,0);}
   finally{globalThis.fetch=originalFetch;if(previous!==undefined)process.env.GROQ_API_KEY=previous;}
+});
+
+test("formatted CVs never silently use a rebuilt export layout",()=>{
+  assert.deepEqual(layoutSafeExports("docx",true),{docx:true,pdf:false});
+  assert.deepEqual(layoutSafeExports("docx",false),{docx:true,pdf:false});
+  assert.deepEqual(layoutSafeExports("pdf",true),{docx:false,pdf:true});
+  assert.deepEqual(layoutSafeExports("pdf",false),{docx:false,pdf:false});
+  assert.deepEqual(layoutSafeExports(null,false),{docx:true,pdf:true});
+  const original=[{id:"one",text:"Original sentence"}];
+  assert.ok(sameDocumentContent(original,[{...original[0]}]));
+  assert.ok(!sameDocumentContent(original,[{id:"one",text:"Edited sentence"}]));
+  assert.ok(!sameDocumentContent(original,[{id:"two",text:"Original sentence"}]));
 });
