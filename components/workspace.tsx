@@ -9,13 +9,18 @@ import { applyDecision, cvSources, keywordReport, localAnalysis, parseCV, isEntr
 import { readCVDocument, readEvidence, saveBlob } from "@/lib/import";
 
 import {defaultCVStyle,blockStyle,cssFont,type CVStyle} from "@/lib/cv-style";
+import {sameDocumentContent,layoutSafeExports} from "@/lib/document-preservation";
 
 const errorText = (e: unknown) => e instanceof Error ? e.message : "Something went wrong. Please try again.";
+type UploadedCV = {bytes:ArrayBuffer;format:string;blocks:Block[]};
 type ModelContext = { registerTool: (tool: {name: string; title: string; description: string; inputSchema: object; annotations: object; execute: (input: unknown) => unknown}, options: {signal: AbortSignal}) => void | Promise<void> };
 
 export default function Workspace() {
   const [cvStyle,setCVStyle]=useState<CVStyle>(defaultCVStyle);
-  const originalFile=useRef<{bytes:ArrayBuffer;format:string;blocks:Block[]}|null>(null);
+  const originalFile=useRef<UploadedCV|null>(null);
+  const [pdfPreviewURL,setPdfPreviewURL]=useState<string|null>(null);
+  const pdfObjectURL=useRef<string|null>(null);
+  useEffect(()=>()=>{if(pdfObjectURL.current)URL.revokeObjectURL(pdfObjectURL.current);},[]);
   const [analysisError,setAnalysisError]=useState("");
   const [comments,setComments]=useState<ReviewComment[]>([]);
   const [jobError,setJobError]=useState("");
@@ -64,9 +69,14 @@ export default function Workspace() {
   const current = useRef({ blocks, original, evidence, job, suggestions }); current.current = { blocks, original, evidence, job, suggestions };
   const report = keywordReport(blocks, job, evidence), accepted = suggestions.filter(s => s.status === "accepted").length, pending = suggestions.filter(s => s.status === "pending").length;
   const sources = cvSources(original.length ? original : blocks, evidence);
+  const uploaded=originalFile.current;
+  const uploadedUnchanged=!uploaded||sameDocumentContent(uploaded.blocks,blocks);
+  const {docx:allowStyledDOCX,pdf:allowStyledPDF}=layoutSafeExports(uploaded?.format||null,uploadedUnchanged);
 
   function setCV(text: string, name = "Pasted CV") {
     setCVStyle(defaultCVStyle());originalFile.current=null;
+    if(pdfObjectURL.current){URL.revokeObjectURL(pdfObjectURL.current);pdfObjectURL.current=null;}
+    setPdfPreviewURL(null);
     const parsed = parseCV(text); setCVText(text); setBlocks(parsed); setOriginal(parsed); setFileName(name);
     setSuggestions([]);setComments([]);setAnalysisError(""); setAnalysisMode(null); setInsights([]); setSample(false);
   }
@@ -93,7 +103,9 @@ export default function Workspace() {
 
   async function uploadCV(file?: File) {
     if (!file) return; setBusy("Reading your CV");
-    try {const document=await readCVDocument(file);setCV(document.text,file.name);setCVStyle(document.style);originalFile.current=document.bytes?{bytes:document.bytes,format:document.format,blocks:parseCV(document.text)}:null;setShowRaw(false); toast.success("CV imported. Check the extracted text before analyzing.");}
+    try {const document=await readCVDocument(file);setCV(document.text,file.name);setCVStyle(document.style);originalFile.current=document.bytes?{bytes:document.bytes,format:document.format,blocks:parseCV(document.text)}:null;
+      if(document.bytes&&document.format==="pdf"){const url=URL.createObjectURL(new Blob([document.bytes],{type:"application/pdf"}));pdfObjectURL.current=url;setPdfPreviewURL(url);}
+      setShowRaw(false);toast.success("CV imported. Its original file will be kept for preview and supported exports.");}
     catch (e) {toast.error(errorText(e));} finally {setBusy(""); if (cvInput.current) cvInput.current.value = "";}
   }
   async function uploadEvidence(files: File[]) {
@@ -152,6 +164,7 @@ export default function Workspace() {
     } catch(e) {toast.error(errorText(e));} finally {setBusy("");}
   }
   async function exportDOCX() {
+    if(originalFile.current?.format==="pdf"){toast.error("For format-preserving edits, upload the original DOCX. A PDF cannot be safely converted into an identical editable Word file.");return;}
     setBusy("Preparing DOCX");
     try {
       const {Document, Paragraph, TextRun, Packer, HeadingLevel} = await import("docx");
@@ -161,7 +174,8 @@ export default function Workspace() {
     } catch(e) {toast.error(errorText(e));} finally {setBusy("");}
   }
   async function downloadPDF(){
-    setBusy("Preparing PDF");try{const file=originalFile.current,unchanged=file&&file.format==="pdf"&&JSON.stringify(file.blocks)===JSON.stringify(blocks);if(unchanged){saveBlob(new Blob([file.bytes],{type:"application/pdf"}),"tailored-cv.pdf");}else{const {exportPDF}=await import("@/lib/export");saveBlob(new Blob([new Uint8Array(await exportPDF(blocks,cvStyle)).buffer],{type:"application/pdf"}),"tailored-cv.pdf");}toast.success("PDF downloaded without browser headers or footers.");}catch(e){toast.error(errorText(e));}finally{setBusy("");}
+    if(originalFile.current&&(originalFile.current.format!=="pdf"||!sameDocumentContent(originalFile.current.blocks,blocks))){toast.error("Exact-layout PDF export is only available for an unchanged source PDF. For approved edits, export the source DOCX through Word.");return;}
+    setBusy("Preparing PDF");try{const file=originalFile.current,unchanged=file&&file.format==="pdf"&&sameDocumentContent(file.blocks,blocks);if(unchanged){saveBlob(new Blob([file.bytes],{type:"application/pdf"}),"tailored-cv.pdf");}else{const {exportPDF}=await import("@/lib/export");saveBlob(new Blob([new Uint8Array(await exportPDF(blocks,cvStyle)).buffer],{type:"application/pdf"}),"tailored-cv.pdf");}toast.success("PDF downloaded without browser headers or footers.");}catch(e){toast.error(errorText(e));}finally{setBusy("");}
   }
   function rejectDescription(){const message=descriptionError(job)||"You pasted the wrong thing: put the URL into Job link and press Read link.";setJobError(message);toast.error(message,{position:"top-right",id:"wrong-description"});}
   function validateInputs(){const error=descriptionError(job);if(error){setJobError(error);toast.error(error,{position:"top-right",id:"wrong-description"});return false;}if(!blocks.length){toast.error("Add your CV first.");return false;}return true;}
@@ -189,8 +203,8 @@ export default function Workspace() {
                 <span className="upload-icon">{blocks.length?<FileText size={25}/>:<Upload size={25}/>}</span><strong>{fileName || "Drop your CV here"}</strong><span>{blocks.length ? "Click to replace your CV" : "or click to choose a file"}</span><small>PDF, DOCX, TXT · up to 10 MB</small>
               </button>
               <div className="split-label"><span>{blocks.length?`${blocks.length} text lines extracted`:"Prefer to paste it?"}</span><button className="text-button" disabled={!!busy} onClick={()=>setShowRaw(!showRaw)}>{showRaw?"Hide text":blocks.length?"Check extracted text":"Paste CV text"}</button></div>
-              {showRaw&&<label className="field"><span>CV text</span><textarea className="cv-text-input" value={cvText} maxLength={25000} disabled={!!busy} onChange={e=>{const importedStyle=cvStyle;setCV(e.target.value,fileName);setCVStyle({...importedStyle,blocks:{}});}} placeholder="Paste your CV, including section headings…" /></label>}
-              {blocks.length>0&&!showRaw&&<div className="mini-preview"><p className="preview-label">TEXT PREVIEW</p>{blocks.slice(0,5).map(b=><p className={b.heading?"mini-heading":""} key={b.id}>{b.text}</p>)}{blocks.length>5&&<span className="muted">+ {blocks.length-5} more lines</span>}</div>}
+              {showRaw&&<label className="field"><span>CV text</span>{originalFile.current&&<small className="small-note">Changing extracted text here detaches the original file. Use review suggestions to preserve Word formatting.</small>}<textarea className="cv-text-input" value={cvText} maxLength={25000} disabled={!!busy} onChange={e=>{const importedStyle=cvStyle;setCV(e.target.value,fileName);setCVStyle({...importedStyle,blocks:{}});}} placeholder="Paste your CV, including section headings…" /></label>}
+              {blocks.length>0&&!showRaw&&!originalFile.current&&<div className="mini-preview"><p className="preview-label">TEXT PREVIEW</p>{blocks.slice(0,5).map(b=><p className={b.heading?"mini-heading":""} key={b.id}>{b.text}</p>)}{blocks.length>5&&<span className="muted">+ {blocks.length-5} more lines</span>}</div>}
               <div className="source-note"><p>Files are read in your browser. They aren’t stored on our server. AI mode sends extracted text to Groq when you request an analysis.</p></div>
             </section>
             <div className="context-column">
@@ -214,7 +228,7 @@ export default function Workspace() {
         <TabsContent value="review">
           <div className="review-summary"><div><h2>Suggestions and comments</h2><p>{analysisMode==="local"?"Non-AI checks and questions. Connect Groq for an AI review.":"Review of this job and your sources. Accept, reject, or revise suggestions; comments explain what needs clarification."}</p></div><span className="review-count"><strong>{accepted}</strong> / {suggestions.length} accepted</span></div>
           <div className="review-grid">
-            <section className="document-panel"><div className="document-toolbar"><span><FileText size={16}/> Your current CV</span><span>{accepted ? `${accepted} approved changes` : "Original text"}</span></div><CVDocument blocks={blocks} suggestions={suggestions} style={cvStyle}/><p className="paper-caption">Imported style · only approved edits</p></section>
+            <section className="document-panel"><div className="document-toolbar"><span><FileText size={16}/> {uploaded?"Your uploaded document":"Your CV draft"}</span><span>{uploaded?uploaded.format.toUpperCase():"Text draft"}</span></div><OriginalDocumentPreview source={uploaded} pdfURL={pdfPreviewURL} fileName={fileName} blocks={blocks} suggestions={suggestions} style={cvStyle}/><p className="paper-caption">{uploaded?.format==="pdf"?"Original PDF layout shown. Accepted text edits remain in the review, not the source PDF.":uploaded?.format==="docx"?"Original Word file retained. Its exact page layout is not rendered in the browser.":"Text-only draft · accepted wording shown"}</p></section>
             <section className="suggestions-panel">
               {insights.length>0&&research&&<section className="insights-panel"><h3>Company context</h3>{insights.map((insight,i)=><div key={i} className="company-insight"><p>{insight.point}</p><details><summary>Source</summary><blockquote>{insight.quote}</blockquote><a href={research.sources.find(r=>r.id===insight.sourceId)?.url} target="_blank" rel="noreferrer">{research.sources.find(r=>r.id===insight.sourceId)?.title}</a></details></div>)}</section>}
               {comments.length>0&&<section className="review-comments"><h3>Review comments</h3>{comments.map(c=><article className="review-comment" key={c.id}><div><MessageSquare size={16}/><strong>{c.kind==="question"?"Clarify":c.kind==="strength"?"What works":"Observation"}</strong><span>{c.origin==="ai"?"AI review":"Review check"}</span></div>{c.blockId&&<blockquote>{blocks.find(b=>b.id===c.blockId)?.text}</blockquote>}<p>{c.text}</p></article>)}</section>}
@@ -231,16 +245,16 @@ export default function Workspace() {
           </div>
         </TabsContent>
         <TabsContent value="export">
-          <div className="export-grid"><section><h2 className="export-heading">Export CV</h2><p className="export-copy">Download your CV with approved edits and styling adapted from your upload. Suggestions and comments stay outside the document.</p><div className="export-status"><Check size={18}/>{accepted} changes accepted{pending>0&&<span> · {pending} still pending</span>}</div>
-            <div className="export-actions"><button className="button primary" onClick={exportDOCX} disabled={!!busy}><Download size={18}/> Download DOCX</button><button className="button secondary" onClick={downloadPDF} disabled={!!busy}><FileText size={18}/> Download PDF</button><button className="text-button" onClick={()=>saveBlob(new Blob([blocks.map(b=>b.text).join("\n")],{type:"text/plain;charset=utf-8"}),"tailored-cv.txt")}><Download size={16}/> Download plain text</button></div>
-            <div className="export-note"><h3>Export format</h3><p>An unchanged PDF is returned in its original layout. Edited PDFs use the detected font family, sizes, alignment, and heading style; complex layouts may reflow. DOCX uploads retain their original formatting. No browser timestamps, page URLs, or app branding are added.</p></div>
+          <div className="export-grid"><section><h2 className="export-heading">Export CV</h2><p className="export-copy">Download approved wording without silently replacing your uploaded document’s design. Suggestions and comments stay outside the document.</p><div className="export-status"><Check size={18}/>{accepted} changes accepted{pending>0&&<span> · {pending} still pending</span>}</div>
+            <div className="export-actions">{allowStyledDOCX&&<button className="button primary" onClick={exportDOCX} disabled={!!busy}><Download size={18}/> Download DOCX</button>}{allowStyledPDF&&<button className="button secondary" onClick={downloadPDF} disabled={!!busy}><FileText size={18}/> Download PDF</button>}<button className="text-button" onClick={()=>saveBlob(new Blob([blocks.map(b=>b.text).join("\n")],{type:"text/plain;charset=utf-8"}),"tailored-cv.txt")}><Download size={16}/> Download plain text</button></div>
+            <div className="export-note"><h3>Layout preservation</h3><p>{uploaded?.format==="pdf"?(uploadedUnchanged?"Download the exact original PDF.":"An edited PDF cannot reliably retain its original fonts, spacing, columns and page layout. Download the approved wording as text, or upload the original DOCX to apply changes while retaining its styles. The original PDF remains untouched."):uploaded?.format==="docx"?"The DOCX download patches the original Word file rather than recreating it. To get a PDF with the same layout, open the downloaded DOCX in Word or Google Docs and export it as PDF.":"No original designed file was uploaded. New DOCX and PDF files use a neutral layout."}</p></div>
             <button className="text-button" onClick={()=>saveBlob(new Blob([JSON.stringify({version:3,cv:blocks,original,suggestions,comments,evidence,job,research,insights,cvStyle},null,2)],{type:"application/json"}),"cv-agent-review.json")}><Download size={16}/> Save review history</button><p className="small-note">This session is temporary. Download your work before closing the tab. Review history contains your CV, job text, and evidence.</p>
-          </section><section className="document-panel"><CVDocument blocks={blocks} suggestions={[]} style={cvStyle}/></section></div>
+          </section><section className="document-panel"><OriginalDocumentPreview source={uploaded} pdfURL={pdfPreviewURL} fileName={fileName} blocks={blocks} suggestions={[]} style={cvStyle}/></section></div>
         </TabsContent>
       </Tabs>
       <footer className="footer"><span>CV Agent</span><p>Job alignment and formatting guidance. No universal ATS score or guaranteed outcome.</p><a href="https://github.com/lamanmamed/cv-agent" target="_blank" rel="noreferrer">Source code <Github size={14}/></a></footer>
     </main>
-    <div className="print-only"><CVDocument blocks={blocks} suggestions={[]} style={cvStyle}/></div>
+    {!uploaded&&<div className="print-only"><CVDocument blocks={blocks} suggestions={[]} style={cvStyle}/></div>}
     <Dialog open={settings} onOpenChange={setSettings}><DialogContent className="settings-dialog"><DialogTitle>Connect AI</DialogTitle><DialogDescription>AI tailoring uses Groq. Create a free-plan account, generate an API key, and connect it here.</DialogDescription>{savedKey&&<p className="small-note">A key is saved securely for this private app. Test it below, or enter another key for this session.</p>}<label className="field"><span>Groq API key</span><input type="password" autoComplete="off" disabled={!!busy} value={key} onChange={e=>{startupConnection.current?.abort();setKey(e.target.value.trim());setKeyVerified(false);setConnectionError("");}} placeholder="gsk_…"/></label><p className="small-note">Testing runs a small AI generation request using fictional data and the review format; it uses your Groq quota. During AI analysis, CV and project text is sent to Groq. A key entered here stays in this tab’s memory. A saved key is used by the server and is never sent to your browser.</p><p className="small-note">Job and company URLs are read through Jina Reader. CV files are not sent to that reader. Keep your Groq account on the free plan if you want to avoid paid inference.</p>{connectionError&&<p role="alert" className="connection-error">{connectionError}</p>}<a href="https://console.groq.com/keys" target="_blank" rel="noreferrer" className="text-button">Create a Groq key</a><div className="dialog-actions"><button className="button secondary" disabled={!!busy} onClick={()=>{startupConnection.current?.abort();setKey("");setKeyVerified(false);setSettings(false);}}>Disconnect</button><button className="button primary" disabled={!!busy||(key.length<10&&!savedKey)} onClick={verifyKey}>{busy?"Testing…":"Test and connect"}</button></div></DialogContent></Dialog>
   </>;
 }
@@ -254,6 +268,18 @@ function ChangeText({before,after,side}:{before:string;after:string;side:"before
   while(end<Math.min(a.length,b.length)-start&&a[a.length-1-end]===b[b.length-1-end])end++;
   const words=side==="before"?a:b,prefix=words.slice(0,start).join(" "),middle=words.slice(start,words.length-end).join(" "),suffix=end?words.slice(-end).join(" "):"";
   return <>{prefix}{prefix&&middle?" ":""}{middle&&(side==="before"?<del className="change-del">{middle}</del>:<ins className="change-ins">{middle}</ins>)}{suffix&&(prefix||middle)?" ":""}{suffix}</>;
+}
+function OriginalDocumentPreview({source,pdfURL,fileName,blocks,suggestions,style}:{source:UploadedCV|null;pdfURL:string|null;fileName:string;blocks:Block[];suggestions:Suggestion[];style:CVStyle}) {
+  if(source?.format==="pdf")return <div className="source-document">
+    {pdfURL?<><iframe className="source-pdf-frame" src={pdfURL} title="Original uploaded PDF CV" /><a className="source-open-link" href={pdfURL} target="_blank" rel="noopener noreferrer">Open original PDF in a new tab</a></>:<p className="source-layout-note">Loading the original PDF preview…</p>}
+    {source.blocks.some((b,i)=>blocks[i]?.text!==b.text)&&<p className="source-layout-note">This is the original PDF, not a reformatted copy. Approved wording is tracked in the review and cannot be drawn back into the PDF without risking its original layout.</p>}
+  </div>;
+  if(source?.format==="docx")return <div className="source-word-preview">
+    <div className="source-word-heading"><FileText size={32}/><div><h3>Original Word document retained</h3><p>We keep the actual DOCX and patch approved wording into it on export. Browser text extraction cannot display its exact font, spacing, tables or page layout.</p></div></div>
+    <button className="button secondary small" onClick={()=>saveBlob(new Blob([source.bytes],{type:"application/vnd.openxmlformats-officedocument.wordprocessingml.document"}),fileName||"original-cv.docx")}><Download size={15}/> Download original to view in Word</button>
+    <details className="source-word-text"><summary>Show current CV wording (text-only, not a layout preview)</summary><div>{blocks.map(b=><p key={b.id}>{b.text}</p>)}</div></details>
+  </div>;
+  return <CVDocument blocks={blocks} suggestions={suggestions} style={style}/>;
 }
 function CVDocument({blocks,suggestions,style}:{blocks:Block[];suggestions:Suggestion[];style:CVStyle}) {
   return <article className="cv-paper imported-style" style={{fontFamily:cssFont(style.body),lineHeight:style.lineHeight,padding:`${style.margin*96/72*.6}px`}} aria-label="CV preview">{blocks.map((b,i)=>{
