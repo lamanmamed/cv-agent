@@ -95,7 +95,8 @@ function PDFReviewDocument({source,suggestions,active,preview,onSelect}:{source:
 function getRowRects(page:PageData,anchor:PDFAnchor,scale:number){
   const viewport=page.page.getViewport({scale});
   return page.rows.slice(anchor.firstRow,anchor.lastRow+1).map(row=>{
-    const [x1,y1,x2,y2]=viewport.convertToViewportRectangle([row.x,row.y-2,row.x+Math.max(row.width,12),row.y+Math.max(row.height,9)]);
+    const [x1,y1]=viewport.convertToViewportPoint(row.x,row.y-2);
+    const [x2,y2]=viewport.convertToViewportPoint(row.x+Math.max(row.width,12),row.y+Math.max(row.height,9));
     return {left:Math.max(0,Math.min(x1,x2)-2),top:Math.max(0,Math.min(y1,y2)-2),width:Math.abs(x2-x1)+4,height:Math.abs(y2-y1)+4};
   });
 }
